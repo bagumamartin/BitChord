@@ -39,7 +39,7 @@ struct DownloadManagerView: View {
                             HStack {
                                 VStack(alignment: .leading) {
                                     Text(job.title)
-                                    Text(label(job.status))
+                                    Text(store.activity(for: job)?.label ?? label(job.status))
                                         .font(.caption)
                                         .foregroundStyle(job.status == .failed ? .red : .secondary)
                                     if let message = job.message, job.status == .failed {
@@ -47,6 +47,7 @@ struct DownloadManagerView: View {
                                     }
                                 }
                                 Spacer()
+                                if let activity = store.activity(for: job) { DownloadProgressIndicator(activity: activity) }
                                 switch job.status {
                                 case .queued, .running:
                                     Button("Cancel") {

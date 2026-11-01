@@ -70,7 +70,18 @@ struct CachedSongsView: View {
         List {
             Section {
                 ForEach(entries) { entry in
-                    row(entry)
+                    Button {
+                        let selected = entries.firstIndex(where: { $0.id == entry.id }) ?? 0
+                        let queue = entries.map { cached in
+                            let track = metadata[cached.videoId]
+                            let source = cached.videoId.hasPrefix("src:") || cached.videoId.hasPrefix("saavn:") ? cached.videoId : "yt:" + cached.videoId
+                            return QueueEntry(id: cached.videoId, title: track?.title ?? cached.videoId,
+                                artist: track?.artist ?? "", source: source, thumbnailUrl: track?.art,
+                                albumName: track?.album, isLocal: false)
+                        }
+                        controller.play(queue, at: selected, context: "Cached songs", contextID: "cached:songs")
+                    } label: { row(entry) }
+                        .buttonStyle(.plain)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button("Remove", systemImage: "trash", role: .destructive) {
                                 Task { await remove(entry) }

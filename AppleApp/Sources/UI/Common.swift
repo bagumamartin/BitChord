@@ -842,7 +842,9 @@ struct SongRow: View {
                 }
             }
             Spacer(minLength: 8)
-            if isDownloaded {
+            if let activity = DownloadStore.shared.activity(for: entry), activity.phase != .saved {
+                DownloadProgressIndicator(activity: activity)
+            } else if isDownloaded {
                 // Upstream's downloadedTint: the row says the song is already
                 // on the device, so a Download menu row is not a mystery.
                 Image(systemName: "arrow.down.circle.fill")
@@ -885,6 +887,7 @@ struct SongRow: View {
         if !entry.artist.isEmpty { parts.append(entry.artist) }
         if let duration = entry.durationText, !duration.isEmpty { parts.append(duration) }
         if buffering { parts.append("Buffering") }
+        if let activity = DownloadStore.shared.activity(for: entry) { parts.append(activity.label) }
         return parts.joined(separator: ", ")
     }
 }

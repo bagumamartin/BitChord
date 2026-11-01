@@ -24,6 +24,7 @@ struct DownloadsView: View {
     @State private var uploadingSelection = false
     @State private var showUploadSummary = false
     @State private var uploadSummary = ""
+    @State private var showDownloadManager = false
 
     enum Tab: String, CaseIterable, Identifiable {
         case songs = "Songs"
@@ -97,12 +98,26 @@ struct DownloadsView: View {
     var body: some View {
         Group {
             if store.items.isEmpty {
-                EmptyStateView(
+                if !store.jobs.isEmpty {
+                    ScrollView { LazyVStack(spacing: 16) {
+                        ForEach(store.jobs) { job in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(job.title).lineLimit(1)
+                                    Text(store.activity(for: job)?.label ?? job.status.rawValue).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if let activity = store.activity(for: job) { DownloadProgressIndicator(activity: activity) }
+                            }
+                        }
+                        Button("Manage downloads") { showDownloadManager = true }
+                    }.padding(24) }
+                } else { EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "No downloads yet",
                     subtitle: "Save a track from Now Playing — BitChord tags it and keeps it here.",
                     buttonTitle: nil, action: nil
-                )
+                ) }
             } else {
                 content
             }
@@ -120,6 +135,8 @@ struct DownloadsView: View {
         }
         #endif
         .onAppear { store.refresh() }
+        .sheet(isPresented: $showDownloadManager) { DownloadManagerView() }
+        .toolbar { ToolbarItem(placement: .primaryAction) { Button("Manage downloads", systemImage: "arrow.down.circle") { showDownloadManager = true } } }
     }
 
     @ViewBuilder
