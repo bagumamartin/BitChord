@@ -182,8 +182,8 @@ object SourceResolver {
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE } ?: return null
         val requested = requestForNow()
         val mayUseLossless = PlaybackCodecCapabilities.allowLosslessSources
-        // The chosen source quality still applies on Bluetooth. The physical
-        // output capability remains separate for addons that explicitly require it.
+        // The quality setting decides; the output route does not. The physical
+        // output capability only applies to addons that explicitly require it.
         val routeRequest = if (requested is StreamRequest.Lossless && !mayUseLossless) StreamRequest.Best else requested
         val (source, stream) = bestAcross(
             rankedAbove(youtube.configId, active), target, routeRequest,

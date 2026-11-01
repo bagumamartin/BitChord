@@ -862,13 +862,6 @@ final class PlaybackController {
     private var routeRecoveryGeneration: UInt64 = 0
     private func outputRouteChanged() {
         let route = AudioRouteState.shared
-        if !PlaybackCodecCapabilities.shared.allowLosslessSources, let mediaId = current?.id {
-            qualityUpgradeTask?.cancel()
-            qualityUpgradeTask = nil
-            QualityUpgrade.forget(mediaId)
-            upgradeFor = nil
-            racingLossless = false
-        }
         let returnedFromBluetooth = route.previousKind.lowercased().contains("bluetooth") && route.carriesLossless
         routeRecoveryGeneration &+= 1
         let recovery = routeRecoveryGeneration

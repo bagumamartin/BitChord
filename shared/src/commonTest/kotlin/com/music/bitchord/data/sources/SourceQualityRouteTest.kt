@@ -32,4 +32,21 @@ class SourceQualityRouteTest {
             PlaybackCodecCapabilities.setLosslessOutput(physical)
         }
     }
+
+    /** A wired output carries lossless, but the data limit still applies to it. */
+    @Test fun wiredOutputDoesNotBypassACappedQualitySetting() {
+        val cellular = AppSettings.audioQualityCellular.value.name
+        val metered = AppSettings.meteredConnection.value
+        val physical = PlaybackCodecCapabilities.losslessOutput
+        try {
+            PlaybackCodecCapabilities.setLosslessOutput(true)
+            AppSettings.setAudioQualityCellular("MEDIUM")
+            AppSettings.setMeteredConnection(true)
+            assertFalse(PlaybackCodecCapabilities.allowLosslessSources)
+        } finally {
+            AppSettings.setAudioQualityCellular(cellular)
+            AppSettings.setMeteredConnection(metered)
+            PlaybackCodecCapabilities.setLosslessOutput(physical)
+        }
+    }
 }
