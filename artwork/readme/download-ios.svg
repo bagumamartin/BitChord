@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="68" viewBox="0 0 250 68" role="img" aria-label="Download for iPhone and iPad">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF6178"/>
+      <stop offset="1" stop-color="#F5263F"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="248" height="66" rx="14" fill="#0D1117" stroke="#3D444D" stroke-width="2"/>
+  <rect x="20" y="20" width="30" height="34" rx="4" fill="none" stroke="url(#g)" stroke-width="3"/>
+  <rect x="44" y="13" width="21" height="42" rx="5" fill="#0D1117" stroke="url(#g)" stroke-width="3.5"/>
+  <rect x="50.5" y="18" width="8" height="2.5" rx="1.25" fill="url(#g)"/>
+  <text x="82" y="30" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#C9D1D9">Download for</text>
+  <text x="81" y="53" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="url(#g)">iPhone &amp; iPad</text>
+</svg>
