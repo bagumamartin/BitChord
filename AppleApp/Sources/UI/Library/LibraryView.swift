@@ -51,9 +51,7 @@ struct LibraryView: View {
                 .navigationTitle("Library")
                 .toolbar {
                     #if os(iOS)
-                    ToolbarItem(placement: .topBarLeading) {
-                        TopBarLeadingMark()
-                    }
+                    TopBarLeadingItems()
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         // One shared pill for the action buttons — not a glass
                         // disc each. (The account disc beside it stays solo,

@@ -43,9 +43,7 @@ struct LocalMusicView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    TopBarLeadingMark()
-                }
+                TopBarLeadingItems()
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
                         pickFolder()

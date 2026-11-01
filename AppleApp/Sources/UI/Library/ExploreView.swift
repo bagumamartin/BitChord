@@ -19,9 +19,7 @@ struct ExploreView: View {
                 .navigationTitle("Explore")
                 .toolbar {
                     #if os(iOS)
-                    ToolbarItem(placement: .topBarLeading) {
-                        TopBarLeadingMark()
-                    }
+                    TopBarLeadingItems()
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
                     #endif
                 }

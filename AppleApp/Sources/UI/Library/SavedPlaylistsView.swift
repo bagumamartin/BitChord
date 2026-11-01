@@ -66,9 +66,7 @@ struct SavedShelfView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                TopBarLeadingMark()
-            }
+            TopBarLeadingItems()
             ToolbarItem(placement: .topBarTrailing) {
                 TopBarAccountButton()
             }
@@ -176,9 +174,7 @@ struct SavedPlaylistsView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                TopBarLeadingMark()
-            }
+            TopBarLeadingItems()
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // Actions first, the account last: the profile is the
                 // trailing item on every page, so it stays put here too.

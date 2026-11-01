@@ -88,9 +88,7 @@ struct YoutubeLibraryView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                TopBarLeadingMark()
-            }
+            TopBarLeadingItems()
             ToolbarItem(placement: .topBarTrailing) {
                 TopBarAccountButton()
             }

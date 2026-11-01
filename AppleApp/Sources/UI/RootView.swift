@@ -42,12 +42,23 @@ struct RootView: View {
     /// Regular width is the iPad layout — on any device. A Max phone turned
     /// sideways is a regular-width window too, and it has the room.
     @Environment(\.horizontalSizeClass) private var sizeClass
-    /// The iPad's own sidebar (IPadSidebar.swift) and what it lists.
-    @State private var iPadSidebar = IPadSidebar()
+    /// The listener's own playlists, listed in the iPad's sidebar as Music
+    /// lists them.
     @State private var sidebarPlaylists: [UserPlaylistDTO] = []
-    @State private var sidebarPlaylist: UserPlaylistDTO?
-    /// The library section the iPad's Library tab shows: the sidebar picks it,
-    /// and the tab bar's Library returns to it.
+    /// The sidebar playlist row being passed through to Library > Playlists.
+    @State private var passingPlaylist: String?
+    /// Each iPad tab's page history; a playlist chosen in the sidebar is pushed
+    /// on Library > Playlists, so the tab bar shows Library rather than a tab
+    /// of its own.
+    @State private var pageHistories = PageHistories()
+    /// The adaptable sidebar only honours a section's default visibility with
+    /// customisation on, and it keeps the Playlists section out of the tab bar.
+    @State private var tabCustomization = TabViewCustomization()
+    /// The playlists' artwork for their sidebar rows, by playlist id. A sidebar
+    /// row takes an image, not a view, so it is fetched ahead.
+    @State private var sidebarArtwork: [String: UIImage] = [:]
+    /// The library section last chosen on the iPad, where a deep link to the
+    /// Library lands.
     @SceneStorage("bitchord.iPadLibrary") private var iPadLibraryTab: Int = AppModel.Tab.libraryYouTube.rawValue
     #endif
     @AppStorage(OnboardingView.doneKey) private var onboardingDone = false
@@ -198,7 +209,7 @@ struct RootView: View {
             // A regular-width iPad's field is a button that opens into a pill
             // and moves the tab bar aside; arriving at the page must not do
             // that by itself. Re-tapping the tab, ⌘F and the intents still do.
-            if new == .search, sizeClass != .regular { appModel.focusSearch = true }
+            if new == .tab(.search), sizeClass != .regular { appModel.focusSearch = true }
             #else
             if new == .search { appModel.focusSearch = true }
             #endif
@@ -245,20 +256,7 @@ struct RootView: View {
         #if os(macOS)
         macShell
         #else
-        IPadSidebarShell(state: iPadSidebar, enabled: sizeClass == .regular) {
-            IPadSidebarView(
-                selection: Binding(
-                    get: { resolvedTab(AppModel.Tab(rawValue: selection) ?? .home) },
-                    set: { selection = $0.rawValue }
-                ),
-                playlists: sidebarPlaylists,
-                openPlaylist: $sidebarPlaylist,
-                state: iPadSidebar
-            )
-        } content: {
-            contentStack
-        }
-        .environment(\.iPadSidebar, sizeClass == .regular ? iPadSidebar : nil)
+        contentStack
         .task(id: "\(auth.sessionEpoch)-\(sizeClass == .regular)") { await loadSidebarPlaylists() }
         .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
             Task { await loadSidebarPlaylists() }
@@ -309,7 +307,18 @@ struct RootView: View {
             return
         }
         var seen = Set<String>()
-        sidebarPlaylists = await LibraryActions.userPlaylists().filter { seen.insert($0.playlistId).inserted }
+        let owned = await LibraryActions.userPlaylists().filter { seen.insert($0.playlistId).inserted }
+        // Liked Music heads the list, as it heads the Playlists page: YouTube's
+        // own playlist of what was liked, which the account's list leaves out.
+        sidebarPlaylists = (seen.contains(SidebarArtwork.likedMusicId) ? [] : [
+            UserPlaylistDTO(playlistId: SidebarArtwork.likedMusicId, title: "Liked Music", subtitle: "", thumbnailUrl: nil)
+        ]) + owned
+        sidebarArtwork[SidebarArtwork.likedMusicId] = SidebarArtwork.likedMusic
+        for playlist in sidebarPlaylists where sidebarArtwork[playlist.playlistId] == nil {
+            guard let url = playlist.thumbnailUrl,
+                  let art = await SidebarArtwork.load(url) else { continue }
+            sidebarArtwork[playlist.playlistId] = art
+        }
     }
 
     /// The tabs that are pages of the Library rather than tabs of their own.
@@ -317,39 +326,39 @@ struct RootView: View {
         tab.rawValue >= AppModel.Tab.libraryYouTube.rawValue
     }
 
-    /// The iPad's Library tab: whichever section the sidebar last chose.
+    /// One of the library's sections, as the iPad's sidebar opens it.
     @ViewBuilder
-    private var iPadLibrary: some View {
-        let section = AppModel.Tab(rawValue: iPadLibraryTab) ?? .libraryYouTube
+    private func librarySection(_ section: AppModel.Tab) -> some View {
         Group {
             switch section {
+            case .libraryPlaylists: LibraryView(lockedSection: .playlists)
             case .librarySongs: LibraryView(lockedSection: .songs)
             case .libraryAlbums: LibraryView(lockedSection: .albums)
             case .libraryArtists: LibraryView(lockedSection: .artists)
-            case .libraryPlaylists: LibraryView(lockedSection: .playlists)
             case .librarySubscriptions: LibraryView(lockedSection: .subscriptions)
             case .libraryPodcasts: LibraryView(lockedSection: .podcasts)
             case .libraryOnDevice, .libraryDownloads: LibraryView(lockedSection: .ondevice)
             case .libraryHistory: LibraryView(lockedSection: .history)
             case .libraryWebDav: LibraryView(lockedSection: .webdav)
-            case .sidebarPlaylist:
-                if let playlist = sidebarPlaylist {
-                    NavigationStack {
-                        DetailView(browseId: playlist.browseId, initialTitle: playlist.title)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarLeading) { TopBarLeadingMark() }
-                            }
-                    }
-                } else {
-                    LibraryView(lockedSection: .playlists)
-                }
             default: LibraryView(lockedSection: .youtube)
             }
         }
-        // A fresh navigation stack per section: a page pushed in Songs is not
-        // still on top when the sidebar moves to Albums.
-        .id(section == .sidebarPlaylist ? "playlist:\(sidebarPlaylist?.id ?? "")" : "section:\(section.rawValue)")
+        .historyStack(pageHistories.navigator(RootPage.tab(section)))
+        .modifier(iPadPlaybackChrome())
     }
+
+    /// The sidebar's Library rows: the sections of the phone's one Library page.
+    private static let librarySections: [(tab: AppModel.Tab, title: LocalizedStringKey, symbol: String)] = [
+        (.libraryYouTube, "Recent", "clock.arrow.circlepath"),
+        (.librarySongs, "Songs", "music.note"),
+        (.libraryAlbums, "Albums", "square.stack"),
+        (.libraryArtists, "Artists", "music.mic"),
+        (.libraryPlaylists, "Playlists", "music.note.list"),
+        (.librarySubscriptions, "Subscriptions", "bell"),
+        (.libraryPodcasts, "Podcasts", "radio"),
+        (.libraryOnDevice, "On Device", "externaldrive"),
+        (.libraryHistory, "History", "clock"),
+    ]
     #endif
 
     #if os(macOS)
@@ -579,79 +588,165 @@ struct RootView: View {
     #endif
 
     #if os(iOS)
+    /// What the iPad's tabs and sidebar rows select: one of the tabs, or one of
+    /// the listener's playlists, which each have a sidebar row of their own.
+    enum RootPage: Hashable {
+        case tab(AppModel.Tab)
+        case playlist(String)
+    }
+
     private var tabShell: some View {
         TabView(selection: tabBinding) {
             if sizeClass == .regular {
-                // Four tabs, as on the phone. The library's sections are the
-                // sidebar's to choose; the bar's Library returns to the last one.
-                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
-                    HomeView(feed: homeFeed).modifier(iPadPlaybackChrome())
+                // The system's adaptable sidebar, as Music has it: the toggle at
+                // the head of the top tab bar opens it, and the one in it closes
+                // it. The bar shows Home, Explore, the Library section and Search;
+                // the playlists are the sidebar's alone.
+                Tab("Home", systemImage: "house.fill", value: RootPage.tab(.home)) {
+                    HomeView(feed: homeFeed)
+                        .historyStack(pageHistories.navigator(RootPage.tab(.home)))
+                        .modifier(iPadPlaybackChrome())
                 }
-                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
-                    ExploreView().modifier(iPadPlaybackChrome())
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: RootPage.tab(.explore)) {
+                    ExploreView()
+                        .historyStack(pageHistories.navigator(RootPage.tab(.explore)))
+                        .modifier(iPadPlaybackChrome())
                 }
-                Tab("Library", systemImage: "square.stack.fill", value: AppModel.Tab.library) {
-                    iPadLibrary.modifier(iPadPlaybackChrome())
+                TabSection("Library") {
+                    ForEach(Self.librarySections, id: \.tab) { section in
+                        Tab(section.title, systemImage: section.symbol, value: RootPage.tab(section.tab)) {
+                            librarySection(section.tab)
+                        }
+                    }
+                    if WebDavStore.shared.isConfigured {
+                        Tab("WebDAV", systemImage: "cloud", value: RootPage.tab(.libraryWebDav)) {
+                            librarySection(.libraryWebDav)
+                        }
+                    }
                 }
-                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
-                    SearchView().modifier(iPadPlaybackChrome())
+                Tab("Search", systemImage: "magnifyingglass", value: RootPage.tab(.search), role: .search) {
+                    SearchView()
+                        .historyStack(pageHistories.navigator(RootPage.tab(.search)))
+                        .modifier(iPadPlaybackChrome())
                 }
+                // The listener's own playlists, each by its own artwork, as the
+                // Mac's sidebar has them. Sidebar rows only: each opens inside
+                // Library > Playlists.
+                TabSection("Playlists") {
+                    ForEach(sidebarPlaylists) { playlist in
+                        Tab(value: RootPage.playlist(playlist.playlistId)) {
+                            // Passed through: choosing the row opens the
+                            // playlist in Library > Playlists (`tabBinding`).
+                            Color.clear
+                        } label: {
+                            Label {
+                                Text(playlist.title)
+                            } icon: {
+                                if let art = sidebarArtwork[playlist.playlistId] {
+                                    Image(uiImage: art).renderingMode(.original)
+                                } else {
+                                    Image(systemName: "music.note.list")
+                                }
+                            }
+                        }
+                        .customizationID("bitchord.sidebar.playlist.\(playlist.playlistId)")
+                        .tabPlacement(.sidebarOnly)
+                    }
+                }
+                .customizationID("bitchord.sidebar.playlists")
+                .defaultVisibility(.hidden, for: .tabBar)
             } else {
-                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
+                Tab("Home", systemImage: "house.fill", value: RootPage.tab(.home)) {
                     HomeView(feed: homeFeed)
                 }
-                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: RootPage.tab(.explore)) {
                     ExploreView()
                 }
-                Tab("Library", systemImage: "square.stack.fill", value: AppModel.Tab.library) {
+                Tab("Library", systemImage: "square.stack.fill", value: RootPage.tab(.library)) {
                     LibraryView()
                 }
-                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
+                Tab("Search", systemImage: "magnifyingglass", value: RootPage.tab(.search), role: .search) {
                     SearchView()
                 }
             }
         }
-        // The bar only: on the iPad the sidebar is IPadSidebar's, not the
-        // system's floating one.
-        .tabViewStyle(.tabBarOnly)
+        .tabViewStyle(.sidebarAdaptable)
+        .tabViewCustomization($tabCustomization)
+        .onAppear {
+            SidebarSelectionGuard.shared.onPlaylist = { index in
+                if sidebarPlaylists.indices.contains(index) { openSidebarPlaylist(sidebarPlaylists[index].playlistId) }
+            }
+        }
+        .tabViewSidebarBottomBar { IPadSidebarFooter() }
         .modifier(PlaybackPillMount())
     }
     #endif
 
-    private var tabBinding: Binding<AppModel.Tab> {
+    #if os(iOS)
+    private var tabBinding: Binding<RootPage> {
         Binding(
             get: {
-                let tab = resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)
-                #if os(iOS)
-                // Every library section is the one Library tab in the bar.
-                if sizeClass == .regular, Self.isLibrarySection(tab) { return .library }
-                #endif
-                return tab
+                if let passing = passingPlaylist { return .playlist(passing) }
+                return .tab(resolvedTab(AppModel.Tab(rawValue: selection) ?? .home))
             },
-            set: { newTab in
-                #if os(iOS)
-                if sizeClass == .regular, newTab == .library {
-                    let current = resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)
-                    if !Self.isLibrarySection(current) { selection = iPadLibraryTab }
+            set: { page in
+                guard case .tab(let newTab) = page else {
+                    // Normally refused before it gets here (SidebarSelectionGuard).
+                    // If it does arrive, the selection rests on the row for one
+                    // turn: handing the `TabView` back the value it already had
+                    // would leave it on the row's empty page.
+                    if case .playlist(let id) = page {
+                        passingPlaylist = id
+                        Task { @MainActor in
+                            passingPlaylist = nil
+                            openSidebarPlaylist(id)
+                        }
+                    }
                     return
                 }
-                #endif
-                // Upstream's `searchFocusTrigger`: re-tapping the tab that is
-                // already selected focuses its search field rather than doing
-                // nothing. A `TabView` cannot tell a re-tap from a no-op tap on
-                // its own — the binding's setter only sees the value it is being
-                // set to — so the "same tab again" case is recognised here.
-                //
-                // Only Search, because a field is the only thing on any of the
-                // other tabs that a re-tap could reasonably mean. A re-tap that
-                // scrolled Home to the top or popped the Library back would be
-                // inventing behaviour nobody asked for.
-                if newTab == .search, newTab == resolvedTab(AppModel.Tab(rawValue: selection) ?? .home) {
-                    appModel.searchFocusTrigger &+= 1
+                if sizeClass == .regular, newTab == .library {
+                    selection = iPadLibraryTab
+                    return
                 }
+                Self.noteSearchRetap(newTab, current: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home), appModel: appModel)
                 selection = newTab.rawValue
             }
         )
+    }
+
+    /// Opens a sidebar playlist inside Library > Playlists, pushed on that tab's
+    /// history so back returns to the list.
+    private func openSidebarPlaylist(_ id: String) {
+        guard let playlist = sidebarPlaylists.first(where: { $0.playlistId == id }) else { return }
+        pageHistories.navigator(RootPage.tab(.libraryPlaylists)).path = [PushRoute(id: UUID()) {
+            AnyView(DetailView(browseId: playlist.browseId, initialTitle: playlist.title))
+        }]
+        selection = AppModel.Tab.libraryPlaylists.rawValue
+    }
+    #else
+    private var tabBinding: Binding<AppModel.Tab> {
+        Binding(
+            get: { resolvedTab(AppModel.Tab(rawValue: selection) ?? .home) },
+            set: { newTab in
+                Self.noteSearchRetap(newTab, current: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home), appModel: appModel)
+                selection = newTab.rawValue
+            }
+        )
+    }
+    #endif
+
+    /// Upstream's `searchFocusTrigger`: re-tapping the tab that is already
+    /// selected focuses its search field rather than doing nothing. A `TabView`
+    /// cannot tell a re-tap from a no-op tap on its own — the binding's setter
+    /// only sees the value it is being set to — so the "same tab again" case is
+    /// recognised here.
+    ///
+    /// Only Search, because a field is the only thing on any of the other tabs
+    /// that a re-tap could reasonably mean. A re-tap that scrolled Home to the
+    /// top or popped the Library back would be inventing behaviour nobody asked
+    /// for.
+    private static func noteSearchRetap(_ tab: AppModel.Tab, current: AppModel.Tab, appModel: AppModel) {
+        if tab == .search, tab == current { appModel.searchFocusTrigger &+= 1 }
     }
 
     private func resolvedTab(_ tab: AppModel.Tab) -> AppModel.Tab {
@@ -662,7 +757,7 @@ struct RootView: View {
         if sizeClass == .regular {
             if tab == .library { return AppModel.Tab(rawValue: iPadLibraryTab) ?? .libraryYouTube }
             // A playlist chosen in an earlier launch is not remembered; its list is.
-            if tab == .sidebarPlaylist, sidebarPlaylist == nil { return .libraryPlaylists }
+            if tab == .sidebarPlaylist { return .libraryPlaylists }
             return tab
         }
         // The phone has one Library page; a section chosen on the iPad (or by a
@@ -959,15 +1054,13 @@ private struct PlaybackAccessory: View {
 /// accessory container. No-op on iPhone, which mounts once at the TabView.
 struct iPadPlaybackChrome: ViewModifier {
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @Environment(\.iPadSidebar) private var sidebar
     @Environment(AppModel.self) private var appModel
 
     func body(content: Content) -> some View {
         pill(content)
-            // The sidebar and the tab bar take turns: open, the sidebar is the
-            // navigation and the bar would only repeat it. The search pill
-            // takes the bar's place too, while it is open.
-            .toolbar(sidebar?.isOpen == true || appModel.iPadSearchExpanded ? .hidden : .automatic, for: .tabBar)
+            .background { if sizeClass == .regular { SidebarSelectionGuardInstaller() } }
+            // The search pill takes the tab bar's place while it is open.
+            .toolbar(appModel.iPadSearchExpanded ? .hidden : .automatic, for: .tabBar)
     }
 
     @ViewBuilder

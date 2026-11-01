@@ -443,9 +443,7 @@ struct SearchView: View {
                 .navigationTitle("Search")
                 .toolbar {
                     #if os(iOS)
-                    ToolbarItem(placement: .topBarLeading) {
-                        TopBarLeadingMark()
-                    }
+                    TopBarLeadingItems()
                     if horizontalSizeClass == .regular {
                         // iPad: the top bar carries the search button (the
                         // pill, once open) and then the YouTube / Library /

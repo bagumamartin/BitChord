@@ -76,7 +76,6 @@ extension PushLink where Label == Text {
     }
 }
 
-#if os(macOS)
 /// A window history the titlebar's back and forward buttons can walk.
 @MainActor
 protocol HistoryNavigating: AnyObject, Observable {
@@ -86,7 +85,8 @@ protocol HistoryNavigating: AnyObject, Observable {
     func goForward()
 }
 
-/// A history of one stack's pages, for a window with no sidebar (Settings).
+/// A history of one stack's pages: a window with no sidebar (Settings), or
+/// one of the iPad's tabs.
 @MainActor
 @Observable
 final class PathNavigator: HistoryNavigating {
@@ -110,6 +110,7 @@ final class PathNavigator: HistoryNavigating {
     func goForward() { if canGoForward { index += 1 } }
 }
 
+#if os(macOS)
 /// The Mac window's history: which sidebar row, and which pages pushed on it.
 ///
 /// Back and forward walk whole locations, as Music and Finder do: from an album

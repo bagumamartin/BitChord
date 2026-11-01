@@ -533,28 +533,57 @@ struct Avatar: View {
     }
 }
 
+#if os(iOS)
+/// A page's leading top-bar items: the BitChord mark and, on the iPad, back and
+/// forward through the tab's pages, beside it as the Mac's titlebar has them.
+struct TopBarLeadingItems: ToolbarContent {
+    @Environment(\.pageHistory) private var history
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) { TopBarLeadingMark() }
+        if let history {
+            if #available(iOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .topBarLeading)
+            }
+            ToolbarItem(placement: .topBarLeading) { PageHistoryButtons(navigator: history) }
+        }
+    }
+}
+
+/// Back and forward through one tab's pages.
+struct PageHistoryButtons: View {
+    let navigator: PathNavigator
+
+    var body: some View {
+        HStack(spacing: 0) {
+            button("chevron.left", "Back", key: "[", enabled: navigator.canGoBack) { navigator.goBack() }
+            button("chevron.right", "Forward", key: "]", enabled: navigator.canGoForward) { navigator.goForward() }
+        }
+    }
+
+    private func button(
+        _ symbol: String, _ label: LocalizedStringKey, key: KeyEquivalent,
+        enabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .scaledFont(size: 17, weight: .semibold)
+                .frame(width: 36, height: 34)
+                .contentShape(.rect)
+        }
+        .buttonStyle(ProfileCircleButtonStyle())
+        .foregroundStyle(enabled ? Color.primary : Color.primary.opacity(0.3))
+        .disabled(!enabled)
+        .keyboardShortcut(key, modifiers: .command)
+        .accessibilityLabel(label)
+    }
+}
+#endif
+
 /// Root-page brand mark: upstream FrostedTopBar's leading BitChord logo,
 /// sized and positioned for native Apple navigation bars across all primary tabs.
 struct TopBarLeadingMark: View {
-    #if os(iOS)
-    /// Present only in the iPad shell, whose root pages carry the sidebar toggle
-    /// here instead; the mark itself moves to the sidebar's header.
-    @Environment(\.iPadSidebar) private var sidebar
-    #endif
-
     var body: some View {
-        #if os(iOS)
-        if let sidebar {
-            IPadSidebarToggle(sidebar: sidebar)
-        } else {
-            mark
-        }
-        #else
-        mark
-        #endif
-    }
-
-    private var mark: some View {
         Image(.bchLogo)
             .resizable()
             .scaledToFit()

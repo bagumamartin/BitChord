@@ -28,9 +28,7 @@ struct HomeView: View {
                 .toolbar {
                     #if os(iOS)
                     // Upstream FrostedTopBar's root-page leading BitChord logo.
-                    ToolbarItem(placement: .topBarLeading) {
-                        TopBarLeadingMark()
-                    }
+                    TopBarLeadingItems()
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
                     #endif
                 }
