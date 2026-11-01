@@ -322,6 +322,8 @@
         }
       }
     },
+    "Accelerated Beat Detection": {},
+    "Accelerated beat detection": {},
     "Access your playlists, library, and personalized mixes.": {},
     "Account": {},
     "Account & Integrations": {},
@@ -1126,7 +1128,10 @@
     },
     "Beat This! (beat and downbeat detection) and open-unmix UMX-L (vocal detection). Both are verified against a pinned checksum after download.": {},
     "Beat This! (beat and downbeat detection) and open-unmix umxhq (vocal detection). Both are downloaded once and verified against a pinned checksum.": {},
+    "Beat This! (beat and downbeat detection, optionally accelerated by Core ML), open-unmix umxhq (vocal detection), and the Core ML compilation of the same Beat This! checkpoint. All are downloaded once and verified against a pinned checksum.": {},
+    "Beat model installed with Core ML acceleration; vocal detection can be added for vocal-clash avoidance": {},
     "Beat model installed; vocal detection can be added for vocal-clash avoidance": {},
+    "Beat, downbeat and vocal models installed, accelerated by Core ML — %@ on disk": {},
     "BitChord %@": {},
     "BitChord %@ is available. Update using the same method you used to install BitChord. The release page has the change notes.": {},
     "BitChord %@ is out": {},
@@ -1928,6 +1933,7 @@
         }
       }
     },
+    "Core ML · Neural Engine": {},
     "Could not translate this lyric": {},
     "Couldn't load": {},
     "Create": {},
@@ -2354,6 +2360,7 @@
       }
     },
     "Delete %@": {},
+    "Download Models": {},
     "Finds the singing at the start and end of each track so two vocals do not overlap during a transition.": {},
     "Developer": {},
     "Diagnostic Reports": {},
@@ -6086,6 +6093,7 @@
     "Mode": {},
     "Models": {},
     "Models are downloaded once and verified via SHA-256. Manage anytime in Settings.": {},
+    "Models download once · Runs 100% on-device · Private": {},
     "More": {
       "localizations": {
         "de": {
@@ -9670,6 +9678,7 @@
     "Review Profile on Google": {},
     "Review your profile on Google": {},
     "Rich Presence": {},
+    "Runs the same Beat This! model on the Neural Engine, several times faster than the CPU path. Requires the beat model.": {},
     "Same song in Downloads and on this share. Choose which copy wins.": {},
     "Save": {
       "localizations": {
@@ -12919,8 +12928,13 @@
     },
     "That was **%@**.": {},
     "That works.": {},
+    "The Core ML archive could not be opened.": {},
+    "The Core ML archive did not contain a model.": {},
+    "The beat model could not be prepared for Core ML.": {},
+    "The beat model downloaded but could not be prepared for Core ML.": {},
     "The engine has not logged anything about “%@” yet.": {},
     "The folder you selected didn't contain any supported audio files.": {},
+    "The same Beat This! model, compiled for the Neural Engine. It falls back to the standard beat model on short tracks or if inference fails.": {},
     "The server answered and there is no audio in it. If you expected a folder here, it may be somewhere else on the share.": {},
     "The system picker routes this app's audio — AirPlay, Bluetooth and the device speaker.": {},
     "There isn't much from this month yet. Play a few songs and it will fill in.": {},

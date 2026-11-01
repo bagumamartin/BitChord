@@ -31,6 +31,25 @@ pub use plan::{
 pub use sequencer::{rank_candidate_indices, rank_candidates, CandidateScore};
 pub use smoothness::{score_plan, SmoothnessReport};
 
+/// Beat and downbeat logits for one 1500-frame window, in the order the beat
+/// tracker consumes them.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct BeatLogits {
+    pub beat: Vec<f32>,
+    pub downbeat: Vec<f32>,
+}
+
+/// A host-side accelerated beat backend.
+///
+/// The native planner feeds the same 1500-frame log-mel window it would give
+/// rten and receives the two logit heads back. Any failure is `None`: the
+/// planner then discards the partial track and recomputes the whole pass on
+/// rten, so one analysis never mixes backends.
+#[uniffi::export(callback_interface)]
+pub trait BeatAccelerator: Send + Sync {
+    fn infer(&self, mel: Vec<f32>) -> Option<BeatLogits>;
+}
+
 /// Refresh both graphs and discard analyses made with the previous model set.
 /// A track analyzed before a first-run download must get a new beat grid when
 /// the model arrives during the same listening session.
@@ -40,6 +59,15 @@ pub fn configure(beat_path: &str, vocal_path: &str) -> bool {
     // entries remain and are naturally separated by their model digests.
     plan::clear_analysis_cache();
     ready
+}
+
+/// Register or clear the accelerated beat backend. `identity` is the digest of
+/// the downloaded archive the compiled model came from, and is part of the
+/// analysis cache key; an empty identity means "no accelerator".
+pub fn set_beat_accelerator(accelerator: Option<Box<dyn BeatAccelerator>>, identity: String) {
+    if models::set_beat_accelerator(accelerator, identity) {
+        plan::clear_analysis_cache();
+    }
 }
 
 const PI: f64 = core::f64::consts::PI;

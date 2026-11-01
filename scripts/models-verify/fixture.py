@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTP fixture for scripts/check-models.sh.
 
-Serves three deterministic files so the model store's download path can be driven
+Serves the deterministic fixtures so the model store's download path can be driven
 through the states that matter without touching the project's release assets:
 
   /good.bin     a well-behaved file, Range-aware
@@ -10,6 +10,8 @@ through the states that matter without touching the project's release assets:
                 rejection rather than a network error
   /cut.bin      Range-aware, but a request *without* a Range header gets half a body
                 and a closed connection — the interrupted transfer that must resume
+  /coreml.aar   a real Apple Archive containing a dummy BeatThisFinal0.mlpackage,
+                written by scripts/check-models.sh before the server starts
   /count        how many model requests have been served, for the metered test
 
 The fixtures are generated from a fixed seed, so the harness can hash the same file
@@ -78,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         name = self.path.lstrip("/")
-        if name not in ("good.bin", "corrupt.bin", "cut.bin"):
+        if name not in ("good.bin", "corrupt.bin", "cut.bin", "coreml.aar"):
             self.send_error(404)
             return
 

@@ -74,6 +74,7 @@ struct AutomixModelRow: View {
     private var iconName: String {
         switch id {
         case .beat: return "metronome"
+        case .beatCoreML: return "bolt.circle"
         case .vocals: return "waveform.badge.mic"
         }
     }
@@ -81,6 +82,7 @@ struct AutomixModelRow: View {
     private var iconColor: Color {
         switch id {
         case .beat: return .blue
+        case .beatCoreML: return .orange
         case .vocals: return .purple
         }
     }
@@ -133,7 +135,7 @@ struct AutomixModelRow: View {
 
         case .installed:
             HStack(spacing: 12) {
-                Button("Verify") { store.verify(id) }
+                Button("Verify") { Task { await store.verify(id) } }
                     .font(.footnote)
                     .buttonStyle(.plain)
                 Button("Remove") { store.remove(id) }
@@ -320,6 +322,7 @@ private struct AutomixModelCard: View {
     private var cardTitle: String {
         switch id {
         case .beat: return "Beat Detection"
+        case .beatCoreML: return "Accelerated Beat Detection"
         case .vocals: return "Vocal Detection"
         }
     }
@@ -327,6 +330,7 @@ private struct AutomixModelCard: View {
     private var cardSubtitle: String {
         switch id {
         case .beat: return "Beat This! AI"
+        case .beatCoreML: return "Core ML · Neural Engine"
         case .vocals: return "open-unmix umxhq"
         }
     }
@@ -335,6 +339,8 @@ private struct AutomixModelCard: View {
         switch id {
         case .beat:
             return "Analyzes beat grids and downbeats so song transitions land perfectly in time with the music."
+        case .beatCoreML:
+            return "The same Beat This! model, compiled for the Neural Engine. It falls back to the standard beat model on short tracks or if inference fails."
         case .vocals:
             return "Finds the singing at the start and end of each track so two vocals do not overlap during a transition."
         }
@@ -343,6 +349,7 @@ private struct AutomixModelCard: View {
     private var iconName: String {
         switch id {
         case .beat: return "metronome"
+        case .beatCoreML: return "bolt.circle"
         case .vocals: return "waveform.badge.mic"
         }
     }
@@ -350,6 +357,7 @@ private struct AutomixModelCard: View {
     private var iconBgColor: Color {
         switch id {
         case .beat: return .blue
+        case .beatCoreML: return .orange
         case .vocals: return .purple
         }
     }
@@ -463,6 +471,7 @@ struct AutomixModelsSheet: View {
                         // Model Cards
                         VStack(spacing: 12) {
                             AutomixModelCard(id: .beat, store: store)
+                            AutomixModelCard(id: .beatCoreML, store: store)
                             AutomixModelCard(id: .vocals, store: store)
                         }
                         .padding(.horizontal, 20)
@@ -473,7 +482,7 @@ struct AutomixModelsSheet: View {
                                 Image(systemName: "lock.shield.fill")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                Text("46.7 MB of models · Runs 100% on-device · Private")
+                                Text("Models download once · Runs 100% on-device · Private")
                                     .font(.caption2.weight(.medium))
                                     .foregroundStyle(.secondary)
                             }
@@ -523,7 +532,7 @@ struct AutomixModelsSheet: View {
             .presentationCornerRadius(28)
             #endif
         }
-        .task { store.refresh() }
+        .task { await store.refresh() }
         .onChange(of: store.status) { old, new in
             announce(from: old, to: new)
         }
@@ -560,7 +569,7 @@ struct AutomixModelsSheet: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             } else {
-                Button("Download Models (~46.7 MB)") {
+                Button("Download Models") {
                     downloadAllMissing()
                 }
                 .buttonStyle(.borderedProminent)
@@ -601,7 +610,7 @@ struct AutomixModelsSheet: View {
                 Button {
                     downloadAllMissing()
                 } label: {
-                    Text("Download Models (~46.7 MB)")
+                    Text("Download Models")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
@@ -680,11 +689,11 @@ struct AutomixModelsPage: View {
                 LabeledContent("Source", value: "GitHub releases")
                 LabeledContent("Licence", value: "MIT (beat + vocals)")
             } footer: {
-                Text("Beat This! (beat and downbeat detection) and open-unmix umxhq (vocal detection). Both are downloaded once and verified against a pinned checksum.")
+                Text("Beat This! (beat and downbeat detection, optionally accelerated by Core ML), open-unmix umxhq (vocal detection), and the Core ML compilation of the same Beat This! checkpoint. All are downloaded once and verified against a pinned checksum.")
             }
         }
         .formStyle(.grouped)
         .navigationTitle("Automix Models")
-        .task { store.refresh() }
+        .task { await store.refresh() }
     }
 }

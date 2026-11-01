@@ -5,12 +5,28 @@ use rten::Model;
 use rten_tensor::prelude::*;
 use sha2::{Digest, Sha256};
 
+use super::BeatAccelerator;
+
 static BEAT: Mutex<Option<Model>> = Mutex::new(None);
 static VOCAL: Mutex<Option<Model>> = Mutex::new(None);
 /// A digest of the two graphs this process actually loaded. The analysis cache
 /// keys on it, so a model change cannot reuse an Analysis made by the old one.
 static IDENTITY: Mutex<String> = Mutex::new(String::new());
 static CONFIGURED: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+
+/// The host's accelerated beat backend, when one is registered. The digest is
+/// the artifact's SHA-256, supplied by the host: the native side never reads the
+/// compiled Core ML bundle, and the digest is what separates its analyses from
+/// the rten ones in the cache.
+struct Accelerator {
+    imp: Option<Arc<dyn BeatAccelerator>>,
+    identity: String,
+}
+
+static ACCELERATOR: Mutex<Accelerator> = Mutex::new(Accelerator {
+    imp: None,
+    identity: String::new(),
+});
 
 thread_local! {
     static INFERENCE_THREADS: Cell<usize> = const { Cell::new(2) };
@@ -103,6 +119,38 @@ pub fn configure(beat_path: &str, vocal_path: &str) -> bool {
     analyzer_ready()
 }
 
+/// Register, replace or clear the accelerated beat backend.
+///
+/// `identity` is the digest of the artifact the host loaded, not one this side
+/// computes: the compiled `.mlmodelc` is derived from the verified archive, and
+/// only the host knows which archive that was. Returns whether the backend set
+/// changed, so the caller can drop analyses it can no longer stand behind.
+pub(crate) fn set_beat_accelerator(
+    accelerator: Option<Box<dyn BeatAccelerator>>,
+    identity: String,
+) -> bool {
+    let mut slot = ACCELERATOR.lock().unwrap();
+    let was_registered = slot.imp.is_some();
+    let was_identity = slot.identity.clone();
+    slot.imp = accelerator.map(Arc::from);
+    slot.identity = if slot.imp.is_some() {
+        if identity.is_empty() {
+            "missing".into()
+        } else {
+            identity
+        }
+    } else {
+        String::new()
+    };
+    was_registered != slot.imp.is_some() || was_identity != slot.identity
+}
+
+/// The registered accelerated backend. The returned handle is cloned out of the
+/// lock and is safe to call without it: a model swap waits for no inference.
+pub(crate) fn accelerator() -> Option<Arc<dyn BeatAccelerator>> {
+    ACCELERATOR.lock().unwrap().imp.clone()
+}
+
 /// The digest of the two graphs the caller asked for (not whether they loaded):
 /// a path that failed to load is still a different model set from another path,
 /// and the analysis cache should not cross them.
@@ -127,8 +175,31 @@ fn digest(path: &str) -> String {
 }
 
 /// The model set the current analyses were made with, for the disk cache key.
+///
+/// The accelerated backend is part of the set: an analysis whose beats came
+/// from Core ML is not interchangeable with one whose beats came from rten, so
+/// the two can never alias even when both are installed.
 pub(crate) fn analysis_identity() -> String {
-    IDENTITY.lock().unwrap().clone()
+    let base = IDENTITY.lock().unwrap().clone();
+    let accelerator = ACCELERATOR.lock().unwrap();
+    compose_identity(
+        &base,
+        accelerator
+            .imp
+            .is_some()
+            .then_some(accelerator.identity.as_str()),
+    )
+}
+
+/// The analysis set with no accelerator registered is the old base identity:
+/// adding the field unconditionally would change every existing listener's cache
+/// key and force a one-time re-analysis of every cached track for an accelerator
+/// they do not have.
+pub(super) fn compose_identity(base: &str, accelerator: Option<&str>) -> String {
+    match accelerator {
+        Some(identity) => format!("{base};beat_accel={identity}"),
+        None => base.to_string(),
+    }
 }
 
 pub fn analyzer_ready() -> bool {

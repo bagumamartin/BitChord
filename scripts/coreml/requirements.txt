@@ -1,0 +1,12 @@
+# Conversion and parity environment. Tested on macOS arm64 with Python 3.9.6;
+# Python 3.10-3.12 also work (the converter adds a __future__ shim on 3.9).
+# beat_this itself is not a pip dependency: convert_beat_this.py fetches
+# CPJKU/beat_this at the commit pinned in beat_this_common.py.
+coremltools==9.0
+einops==0.8.2
+numpy==2.0.2
+rotary-embedding-torch==0.9.1
+soxr==1.1.0
+torch==2.8.0
+torchaudio==2.8.0
+protobuf==6.33.6

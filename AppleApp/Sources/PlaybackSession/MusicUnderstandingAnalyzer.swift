@@ -54,6 +54,11 @@ enum MusicUnderstandingAnalyzer {
         return gpuSuspended
     }
 
+    /// True while the scene is backgrounded on iOS. The Core ML beat backend
+    /// reuses this: `.cpuAndNeuralEngine` never touches the GPU, but background
+    /// analysis stays on rten rather than betting on that distinction.
+    static var isBackgrounded: Bool { isGpuSuspended() }
+
     /// Synchronous so it can be called from async contexts without tripping
     /// Swift 6's scoped-locking rule (`lock()`/`unlock()` must not appear
     /// lexically inside an async function).

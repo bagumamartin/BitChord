@@ -143,7 +143,7 @@ struct BitChordApp: App {
                     Task {
                         await LaunchReadiness.shared.waitForContent()
                         Task { await PageRequestCoordinator.shared.removeLegacyCache() }
-                        AutomixModelStore.shared.refresh()
+                        await AutomixModelStore.shared.refresh()
                         AutomixModelStore.shared.onChanged = {
                             Task {
                                 await reloadAutomixModels(playbackStarted: controller.started)
@@ -339,7 +339,7 @@ struct BitChordApp: App {
     }
 }
 
-/// Hand the analyzer whatever Automix graphs this device has.
+/// Hand the analyzer whatever Automix models this device has.
 ///
 /// The paths are resolved on the main actor — the store's state lives there — and
 /// the load itself runs detached. `configureAnalyzer` accepts empty paths and
@@ -348,17 +348,24 @@ struct BitChordApp: App {
 /// avoiding vocal clashes rather than refusing to transition at all.
 ///
 /// Called at playback startup, preference changes, and model install/removal.
-/// Disabling Automix unloads both graphs; Efficient mode unloads vocals.
+/// Disabling Automix unloads every graph including the Core ML accelerator;
+/// Efficient mode unloads vocals and the accelerator.
 @MainActor
 func reloadAutomixModels(playbackStarted: Bool) async {
     let paths = AutomixModelStore.shared.analyzerPaths
+    let accelerator = AutomixModelStore.shared.beatCoreML
     let enabled = PlatformSettings.shared.getBoolean(key: "smart_fade_enabled", default: true)
     let efficient = PlatformSettings.shared.getString(key: "automix_performance", default: "BALANCED") == "EFFICIENT"
     let selected = AutomixModelPolicy.paths(beat: paths.beat, vocal: paths.vocal,
-        playbackStarted: playbackStarted, enabled: enabled, efficient: efficient)
-    let ready = await AutomixModelLoader.shared.configure(beat: selected.beat, vocal: selected.vocal)
+        accelerator: accelerator, playbackStarted: playbackStarted, enabled: enabled, efficient: efficient)
+    let ready = await AutomixModelLoader.shared.configure(
+        beat: selected.beat,
+        vocal: selected.vocal,
+        accelerator: selected.accelerator
+    )
     DebugLog.shared.d(
-        message: "automix models: beat=\(selected.beat) vocal=\(selected.vocal) loaded=\(ready)"
+        message: "automix models: beat=\(selected.beat) vocal=\(selected.vocal) "
+            + "accelerated=\(selected.accelerator != nil) loaded=\(ready)"
     )
 }
 

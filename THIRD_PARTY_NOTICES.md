@@ -31,8 +31,9 @@ Ktor, Kotlin, kotlinx, QuickJS-KT, and other transitive dependencies have their 
 ## Models and network-provided resources
 
 - **Beat This! beat/downbeat model:** downloaded on demand from the project's GitHub release asset `model-beat-this-final0-v1`; dynamic int8 quantization of CPJKU's `final0` checkpoint, MIT. The model is optional and is not bundled. Provenance and digest are recorded in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
+- **Beat This! Core ML accelerator:** downloaded on demand from the project's GitHub release asset `model-beat-this-final0-coreml-v1` (`beat_this_final0_coreml.aar`); the same MIT-licensed final0 checkpoint compiled for Core ML and packaged as an Apple Archive. The model is optional, accelerates the beat graph on the CPU and Neural Engine, and is not bundled. Provenance and digest are recorded in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
 - **open-unmix vocal model:** downloaded on demand from the project's GitHub release asset `model-umxhq-vocals-v1` (`vocals_umxhq_int8.onnx`, 23,209,009 B, sha256 `7eba6beb…f21ef`); derived from the MIT-licensed official SigSep `umxhq` vocals checkpoint by Stöter and Liutkus (Zenodo record 3370489, original file `vocals-b62c91ce.pth`). The model is optional and is not bundled. Export and digest details are documented in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`. The MIT license text is [`AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt`](AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt).
-- The app bundles software but no analysis models: both Automix graphs are downloaded at runtime. It does not bundle third-party music or song audio.
+- The app bundles software but no analysis models: all three Automix models are downloaded at runtime. It does not bundle third-party music or song audio.
 
 ## Icons, artwork, and translations
 

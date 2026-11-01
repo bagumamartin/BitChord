@@ -1,15 +1,34 @@
 import Foundation
 import CryptoKit
 import Observation
+import AppleArchive
+import CoreML
+import os
+import System
 
-/// The two ONNX graphs Automix downloads.
+/// A compiled beat model and the digest of the archive it came from. The digest
+/// joins the native analysis cache key, so the accelerator's grids never alias
+/// the rten ones.
+struct AutomixAccelerator: Sendable {
+    let modelURL: URL
+    let identity: String
+}
+
+private let automixModelLog = OSLog(
+    subsystem: Bundle.main.bundleIdentifier ?? "com.bitchord.app",
+    category: "Automix"
+)
+
+/// The three Automix model downloads.
 ///
-/// Both are *downloads*: 46.7 MB of graph in every app bundle is 46.7 MB that
-/// every listener pays for, and Automix works without them on the tempo and DSP
-/// fallbacks. The beat graph is what unlocks real beat/downbeat grids; the
-/// vocals graph is optional and only decides how much singing is in a moment.
-/// The old 113 MB vocals download used a different graph and file name; this
-/// store removes it on the first launch after the update.
+/// All are *downloads*: 46.7 MB of ONNX graphs plus the Core ML archive in every
+/// app bundle would be paid for by every listener, and Automix works without
+/// them on the tempo and DSP fallbacks. The beat graph is what unlocks real
+/// beat/downbeat grids; the vocals graph is optional and only decides how much
+/// singing is in a moment. The Core ML archive is the same Beat This! checkpoint
+/// compiled for the Neural Engine, so it accelerates the beat model rather than
+/// replacing it — the ONNX graph stays required as the fallback and for short
+/// tracks.
 ///
 /// Every download is pinned to a revision and verified against a SHA-256 that
 /// was read off the repository before it was written down here. A redirect to a
@@ -31,6 +50,7 @@ final class AutomixModelStore {
 
     enum ModelID: String, CaseIterable, Identifiable {
         case beat
+        case beatCoreML
         case vocals
 
         var id: String { rawValue }
@@ -64,6 +84,27 @@ final class AutomixModelStore {
             // The owner's release asset; the tag is the pin, not a branch.
             url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-v1/beat_this_full_int8.onnx")!
         )
+
+        // Core ML compilation of the same Beat This! final0 checkpoint (CPJKU,
+        // MIT), shipped as an Apple Archive containing BeatThisFinal0.mlpackage.
+        // The ONNX graph above stays required: it is the fallback, and short
+        // tracks use it because the compiled model has a fixed 1500-frame input.
+        static let beatCoreML = ModelSpec(
+            id: .beatCoreML,
+            fileName: "beat_this_final0_coreml.aar",
+            displayName: "Accelerated beat detection",
+            detail: "Runs the same Beat This! model on the Neural Engine, several times faster than the CPU path. Requires the beat model.",
+            byteCount: 18_818_981,
+            sha256: "4f545c60ac59282bd8601104a94ff4123f5304d4e5e233311f6ec67243975fff",
+            // The owner's release asset; the tag is the pin, not a branch.
+            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-coreml-v1/beat_this_final0_coreml.aar")!
+        )
+
+        /// The compiled bundle this archive yields. Kept next to the archive so
+        /// an OS update that invalidates it can be repaired from the verified
+        /// bytes rather than a second download.
+        static let coreMLCompiledName = "BeatThisFinal0.mlmodelc"
+        static let coreMLPackageName = "BeatThisFinal0.mlpackage"
 
         // open-unmix umxhq (SigSep/Inria, MIT). The official vocals checkpoint
         // (vocals-b62c91ce.pth, Zenodo record 3370489) exported to standard ONNX
@@ -129,19 +170,49 @@ final class AutomixModelStore {
     /// end against a fixture server — `scripts/check-models.sh` — rather than only
     /// against the real graph, which is 23.5 MB and somebody else's uptime.
     private let specs: [ModelID: ModelSpec]
+    /// Turns a verified archive into a `.mlmodelc`. Injectable for the download
+    /// checker, whose fixture archive is deliberately not a Core ML model.
+    private let compileCoreML: @Sendable (URL, URL) -> Bool
     private var records: [String: Record] = [:]
     private var tasks: [ModelID: Task<Void, Never>] = [:]
     /// Models removed while a transfer was still winding down. A cancelled task still
     /// reaches its own catch block, and that catch must not report "paused" over the
     /// removal that caused it.
     private var discarded: Set<ModelID> = []
+    /// One compile per destination. A caller that asks for a bundle already being
+    /// built joins that task instead of unpacking and compiling the archive twice.
+    private var compiles: [String: CompileJob] = [:]
+    /// Bumped by ``remove(_:)``. A compile captures it and refuses to move its
+    /// finished bundle into place once it has changed, so a removal that ran while
+    /// the compiler was busy is not undone by the result.
+    private var compileEpochs: [ModelID: Int] = [:]
 
-    init(directory: URL? = nil, specs: [ModelSpec]? = nil) {
+    private struct CompileJob {
+        let token: UUID
+        let task: Task<CompileOutcome, Never>
+    }
+
+    private enum CompileOutcome {
+        case installed
+        case failed
+        /// The model was removed while the compile ran; its bundle was discarded
+        /// rather than moved back into the cleared directory.
+        case discarded
+    }
+
+    init(
+        directory: URL? = nil,
+        specs: [ModelSpec]? = nil,
+        compileCoreML: @escaping @Sendable (URL, URL) -> Bool = { archive, destination in
+            AutomixModelStore.compileCoreMLArchive(from: archive, to: destination)
+        }
+    ) {
         self.directory = directory ?? Self.defaultDirectory
         self.specs = Dictionary(
-            (specs ?? [ModelSpec.beat, ModelSpec.vocals]).map { ($0.id, $0) },
+            (specs ?? [ModelSpec.beat, ModelSpec.beatCoreML, ModelSpec.vocals]).map { ($0.id, $0) },
             uniquingKeysWith: { _, last in last }
         )
+        self.compileCoreML = compileCoreML
         for id in ModelID.allCases {
             status[id] = .notInstalled
         }
@@ -182,13 +253,14 @@ final class AutomixModelStore {
         if let injected = specs[id] { return injected }
         switch id {
         case .beat: return .beat
+        case .beatCoreML: return .beatCoreML
         case .vocals: return .vocals
         }
     }
 
     func status(of id: ModelID) -> Status { status[id] ?? .notInstalled }
 
-    /// Both pinned graphs are installed. The launch offer uses this meaning: a
+    /// All pinned models are installed. The launch offer uses this meaning: a
     /// fallback is usable but still an update waiting to happen, so it keeps
     /// offering.
     var allInstalled: Bool { ModelID.allCases.allSatisfy { status(of: $0).isInstalled } }
@@ -208,7 +280,12 @@ final class AutomixModelStore {
 
     var totalBytesOnDisk: Int64 {
         ModelID.allCases.reduce(0) { total, id in
-            total + sizeOnDisk(of: spec(id).fileName) + sizeOnDisk(of: previousName(for: spec(id)))
+            var bytes = total + sizeOnDisk(of: spec(id).fileName) + sizeOnDisk(of: previousName(for: spec(id)))
+            if id == .beatCoreML {
+                bytes += sizeOnDisk(of: ModelSpec.coreMLCompiledName)
+                bytes += sizeOnDisk(of: ModelSpec.coreMLCompiledName + ".prev")
+            }
+            return bytes
         }
     }
 
@@ -240,6 +317,24 @@ final class AutomixModelStore {
         return ""
     }
 
+    /// The compiled Core ML model the planner may use, with the digest of the
+    /// archive it came from. Nil until both the archive and its `.mlmodelc`
+    /// exist; the ONNX beat graph is unaffected either way.
+    var beatCoreML: AutomixAccelerator? {
+        let spec = spec(.beatCoreML)
+        if status(of: .beatCoreML).isInstalled,
+           let model = compiledModelURL(previous: false) {
+            return AutomixAccelerator(modelURL: model, identity: spec.sha256)
+        }
+        let previousArchive = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        if FileManager.default.fileExists(atPath: previousArchive.path),
+           let model = compiledModelURL(previous: true),
+           let identity = records[previousName(for: spec)]?.sha256 {
+            return AutomixAccelerator(modelURL: model, identity: identity)
+        }
+        return nil
+    }
+
     // MARK: - Refresh
 
     /// Reconcile the directory with the manifest.
@@ -250,7 +345,7 @@ final class AutomixModelStore {
     /// record — copied in by hand, say — is hashed once and recorded, because the
     /// alternative is either trusting it blindly or deleting something the listener
     /// put there.
-    func refresh() {
+    func refresh() async {
         ensureDirectory()
         records = loadRecords()
         // The old 113 MB vocals download used a different graph and file name.
@@ -275,6 +370,7 @@ final class AutomixModelStore {
                         hasPrevious = false
                         changed = true
                     }
+                    if id == .beatCoreML { discardCoreMLPrevious() }
                     status[id] = .installed
                     continue
                 }
@@ -285,6 +381,7 @@ final class AutomixModelStore {
                         try? FileManager.default.removeItem(at: fallback)
                         hasPrevious = false
                     }
+                    if id == .beatCoreML { discardCoreMLPrevious() }
                     status[id] = .installed
                     changed = true
                     continue
@@ -302,6 +399,10 @@ final class AutomixModelStore {
                         // graph that was just verified; the move replaces it.
                         try? FileManager.default.removeItem(at: fallback)
                         try FileManager.default.moveItem(at: file, to: fallback)
+                        if id == .beatCoreML {
+                            records[previousName(for: spec)] = records[spec.fileName]
+                            moveCompiledModel(previous: true)
+                        }
                         records[spec.fileName] = nil
                         saveRecords()
                         hasPrevious = true
@@ -324,7 +425,8 @@ final class AutomixModelStore {
                 // A part that already carries the whole file is finished except for
                 // the check; anything else is a resume point.
                 if partSize == spec.byteCount {
-                    let outcome = installVerified(part: part, spec: spec)
+                    status[id] = .verifying
+                    let outcome = await installVerified(part: part, spec: spec)
                     status[id] = outcome
                     if case .installed = outcome { changed = true }
                 } else if partSize > spec.byteCount {
@@ -338,7 +440,201 @@ final class AutomixModelStore {
             }
         }
 
+        if await reconcileCoreML() { changed = true }
         if changed { onChanged?() }
+    }
+
+    // MARK: - Core ML bundle
+
+    private func compiledModelURL(previous: Bool) -> URL? {
+        let url = compiledDestination(previous: previous)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func compiledDestination(previous: Bool) -> URL {
+        directory.appendingPathComponent(
+            ModelSpec.coreMLCompiledName + (previous ? ".prev" : ""),
+            isDirectory: true
+        )
+    }
+
+    /// Parks the compiled bundle next to the archive it came from.
+    private func moveCompiledModel(previous: Bool) {
+        let source = compiledDestination(previous: false)
+        let destination = compiledDestination(previous: true)
+        // The parked bundle is only ever the one for the archive just parked.
+        // A stale compiled model from an older archive must not inherit the
+        // new archive's digest, so the slot is cleared even when there is
+        // nothing to move into it.
+        try? FileManager.default.removeItem(at: destination)
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+        try? FileManager.default.moveItem(at: source, to: destination)
+    }
+
+    private func discardCoreMLPrevious() {
+        let spec = spec(.beatCoreML)
+        try? FileManager.default.removeItem(at: compiledDestination(previous: true))
+        if records[previousName(for: spec)] != nil {
+            records[previousName(for: spec)] = nil
+            saveRecords()
+        }
+    }
+
+    /// Bring the compiled bundle in line with what refresh found on disk.
+    ///
+    /// A `.mlmodelc` can disappear or be invalidated by an OS update while the
+    /// verified archive is intact, so it is rebuilt from that archive rather
+    /// than downloaded again. If that fails the archive stays, status reports
+    /// the failure, and Automix uses rten.
+    @discardableResult
+    private func reconcileCoreML() async -> Bool {
+        let spec = spec(.beatCoreML)
+        var changed = false
+        let previousArchive = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        if FileManager.default.fileExists(atPath: previousArchive.path) {
+            let name = previousName(for: spec)
+            if records[name] == nil {
+                let digest = hash(of: previousArchive)
+                if !digest.isEmpty {
+                    records[name] = Record(sha256: digest, bytes: sizeOnDisk(of: name), installedAt: Date())
+                    saveRecords()
+                    changed = true
+                }
+            }
+            if compiledModelURL(previous: true) == nil {
+                // The pinned model may not be the one in use, so this compile only
+                // decides whether the fallback is accelerated; restore whatever the
+                // reconcile found instead of claiming an install. A status that is
+                // already busy belongs to another compile and is left alone.
+                let prior = status(of: .beatCoreML)
+                let showingProgress = !prior.isBusy
+                if showingProgress { status[.beatCoreML] = .verifying }
+                let epoch = compileEpochs[.beatCoreML, default: 0]
+                switch await compileCoreMLArchiveAsync(previousArchive, to: compiledDestination(previous: true)) {
+                case .installed:
+                    // A removal that landed just before this continuation owns the
+                    // status now; restoring the old one would resurrect the model.
+                    guard compileEpochs[.beatCoreML, default: 0] == epoch else { return changed }
+                    if showingProgress { status[.beatCoreML] = prior }
+                    changed = true
+                case .failed:
+                    guard compileEpochs[.beatCoreML, default: 0] == epoch else { return changed }
+                    if showingProgress { status[.beatCoreML] = prior }
+                case .discarded:
+                    return changed
+                }
+            }
+        }
+        if status(of: .beatCoreML).isInstalled, compiledModelURL(previous: false) == nil {
+            status[.beatCoreML] = .verifying
+            let epoch = compileEpochs[.beatCoreML, default: 0]
+            switch await compileCoreMLArchiveAsync(fileURL(for: spec), to: compiledDestination(previous: false)) {
+            case .installed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return changed }
+                status[.beatCoreML] = .installed
+                changed = true
+            case .failed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return changed }
+                status[.beatCoreML] = .failed("The beat model downloaded but could not be prepared for Core ML.")
+                return true
+            case .discarded:
+                return changed
+            }
+        }
+        return changed
+    }
+
+    /// Rebuild the compiled model from the verified archive, once. Called when
+    /// loading fails after an OS update invalidated the `.mlmodelc`; a second
+    /// failure leaves Automix on rten.
+    @discardableResult
+    func recompileBeatCoreML() async -> AutomixAccelerator? {
+        let spec = spec(.beatCoreML)
+        if status(of: .beatCoreML).isInstalled {
+            let destination = compiledDestination(previous: false)
+            try? FileManager.default.removeItem(at: destination)
+            status[.beatCoreML] = .verifying
+            let epoch = compileEpochs[.beatCoreML, default: 0]
+            switch await compileCoreMLArchiveAsync(fileURL(for: spec), to: destination) {
+            case .installed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return nil }
+                status[.beatCoreML] = .installed
+                return AutomixAccelerator(modelURL: destination, identity: spec.sha256)
+            case .failed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return nil }
+                status[.beatCoreML] = .failed("The beat model could not be prepared for Core ML.")
+                return nil
+            case .discarded:
+                return nil
+            }
+        }
+        let previousArchive = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        if FileManager.default.fileExists(atPath: previousArchive.path),
+           let identity = records[previousName(for: spec)]?.sha256 {
+            let destination = compiledDestination(previous: true)
+            try? FileManager.default.removeItem(at: destination)
+            let prior = status(of: .beatCoreML)
+            let showingProgress = !prior.isBusy
+            if showingProgress { status[.beatCoreML] = .verifying }
+            let epoch = compileEpochs[.beatCoreML, default: 0]
+            switch await compileCoreMLArchiveAsync(previousArchive, to: destination) {
+            case .installed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return nil }
+                if showingProgress { status[.beatCoreML] = prior }
+                return AutomixAccelerator(modelURL: destination, identity: identity)
+            case .failed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return nil }
+                if showingProgress { status[.beatCoreML] = prior }
+                return nil
+            case .discarded:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// Compile a verified archive for Core ML away from the main actor.
+    ///
+    /// Extraction and `MLModel.compileModel` take seconds on a phone; only the
+    /// final rename happens back on the main actor. One job per destination: a
+    /// caller that arrives mid-compile awaits the same task. The epoch check runs
+    /// after the compile, so a ``remove(_:)`` that happened while it ran wins and
+    /// the finished bundle is deleted instead of moved back into place.
+    private func compileCoreMLArchiveAsync(_ archive: URL, to destination: URL) async -> CompileOutcome {
+        let key = destination.path
+        if let running = compiles[key] { return await running.task.value }
+        let token = UUID()
+        let epoch = compileEpochs[.beatCoreML, default: 0]
+        let compiler = compileCoreML
+        let scratch = destination.deletingLastPathComponent()
+            .appendingPathComponent(".compile-\(token.uuidString)", isDirectory: true)
+        let task = Task { @MainActor () -> CompileOutcome in
+            let compiled = await Task.detached(priority: .utility) {
+                compiler(archive, scratch)
+            }.value
+            // Back on the main actor: the directory the bundle belongs in is only
+            // touched after the compiler is done, so the rename is a quick one.
+            guard compileEpochs[.beatCoreML, default: 0] == epoch else {
+                try? FileManager.default.removeItem(at: scratch)
+                return .discarded
+            }
+            guard compiled else {
+                try? FileManager.default.removeItem(at: scratch)
+                return .failed
+            }
+            do {
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: scratch, to: destination)
+                return .installed
+            } catch {
+                try? FileManager.default.removeItem(at: scratch)
+                return .failed
+            }
+        }
+        compiles[key] = CompileJob(token: token, task: task)
+        let outcome = await task.value
+        if compiles[key]?.token == token { compiles[key] = nil }
+        return outcome
     }
 
     // MARK: - Download
@@ -375,6 +671,28 @@ final class AutomixModelStore {
         }
 
         ensureDirectory()
+        // A verified archive whose compilation failed leaves the download done:
+        // retry the compile instead of transferring the archive again.
+        if id == .beatCoreML, spec.byteCount > 0,
+           sizeOnDisk(of: spec.fileName) == spec.byteCount,
+           records[spec.fileName]?.sha256 == spec.sha256 {
+            status[id] = .verifying
+            let destination = compiledDestination(previous: false)
+            try? FileManager.default.removeItem(at: destination)
+            let epoch = compileEpochs[.beatCoreML, default: 0]
+            switch await compileCoreMLArchiveAsync(fileURL(for: spec), to: destination) {
+            case .installed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return }
+                status[id] = .installed
+                onChanged?()
+            case .failed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return }
+                status[id] = .failed("The beat model could not be prepared for Core ML.")
+            case .discarded:
+                return
+            }
+            return
+        }
         let part = partURL(for: spec)
         var existing = sizeOnDisk(of: spec.fileName + ".part")
 
@@ -384,7 +702,8 @@ final class AutomixModelStore {
         }
         if existing == spec.byteCount {
             status[id] = .verifying
-            let outcome = installVerified(part: part, spec: spec)
+            let outcome = await installVerified(part: part, spec: spec)
+            guard !discarded.contains(id) else { return }
             status[id] = outcome
             if case .installed = outcome { onChanged?() }
             return
@@ -422,7 +741,7 @@ final class AutomixModelStore {
             }
 
             status[id] = .verifying
-            let outcome = installVerified(part: part, spec: spec)
+            let outcome = await installVerified(part: part, spec: spec)
             guard !discarded.contains(id) else { return }
             status[id] = outcome
             if case .installed = outcome { onChanged?() }
@@ -468,6 +787,18 @@ final class AutomixModelStore {
         try? FileManager.default.removeItem(
             at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
         )
+        if id == .beatCoreML {
+            // A compile still running was started from bytes the listener just
+            // removed. Bump the epoch so its result is discarded, and drop the
+            // in-flight entries so a later install compiles the new archive
+            // instead of joining a job the removal has already invalidated.
+            compileEpochs[id, default: 0] += 1
+            compiles[compiledDestination(previous: false).path] = nil
+            compiles[compiledDestination(previous: true).path] = nil
+            try? FileManager.default.removeItem(at: compiledDestination(previous: false))
+            try? FileManager.default.removeItem(at: compiledDestination(previous: true))
+            records[previousName(for: spec)] = nil
+        }
         records[spec.fileName] = nil
         saveRecords()
         status[id] = .notInstalled
@@ -477,7 +808,7 @@ final class AutomixModelStore {
     /// Recompute the hash from disk. `false` means the file was not usable and has
     /// been removed, so nothing downstream should be pointed at it.
     @discardableResult
-    func verify(_ id: ModelID) -> Bool {
+    func verify(_ id: ModelID) async -> Bool {
         let spec = spec(id)
         let file = fileURL(for: spec)
         guard FileManager.default.fileExists(atPath: file.path) else {
@@ -493,10 +824,28 @@ final class AutomixModelStore {
             try? FileManager.default.removeItem(
                 at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
             )
+            records[previousName(for: spec)] = nil
+            if id == .beatCoreML, compiledModelURL(previous: false) == nil {
+                let epoch = compileEpochs[.beatCoreML, default: 0]
+                switch await compileCoreMLArchiveAsync(file, to: compiledDestination(previous: false)) {
+                case .installed:
+                    guard compileEpochs[.beatCoreML, default: 0] == epoch else { return false }
+                    try? FileManager.default.removeItem(at: compiledDestination(previous: true))
+                case .failed:
+                    guard compileEpochs[.beatCoreML, default: 0] == epoch else { return false }
+                    status[id] = .failed("The beat model could not be prepared for Core ML.")
+                    return false
+                case .discarded:
+                    return false
+                }
+            }
             status[id] = .installed
             return true
         }
         try? FileManager.default.removeItem(at: file)
+        if id == .beatCoreML {
+            try? FileManager.default.removeItem(at: compiledDestination(previous: false))
+        }
         records[spec.fileName] = nil
         saveRecords()
         // A verified old graph is not "not usable"; the analyser can stay on it.
@@ -570,12 +919,30 @@ final class AutomixModelStore {
 
     private func sizeOnDisk(of name: String) -> Int64 {
         let url = directory.appendingPathComponent(name, isDirectory: false)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return 0
+        }
+        if isDirectory.boolValue {
+            // A compiled model is a directory of weights; its own metadata size
+            // says nothing about what it occupies.
+            guard let enumerator = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.fileSizeKey]
+            ) else { return 0 }
+            var total: Int64 = 0
+            while let entry = enumerator.nextObject() as? URL {
+                let size = (try? entry.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                total += Int64(size)
+            }
+            return total
+        }
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     /// Move a verified part into place, record it, and report the resulting status.
-    private func installVerified(part: URL, spec: ModelSpec) -> Status {
+    private func installVerified(part: URL, spec: ModelSpec) async -> Status {
         guard sizeOnDisk(of: spec.fileName + ".part") == spec.byteCount else {
             return .failed("The download was incomplete.")
         }
@@ -601,6 +968,26 @@ final class AutomixModelStore {
         try? FileManager.default.removeItem(
             at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
         )
+        records[previousName(for: spec)] = nil
+        if spec.id == .beatCoreML {
+            // The archive is verified, but the planner needs the compiled
+            // bundle. Rebuild it here so an install is usable in this session.
+            try? FileManager.default.removeItem(at: compiledDestination(previous: true))
+            let epoch = compileEpochs[.beatCoreML, default: 0]
+            switch await compileCoreMLArchiveAsync(destination, to: compiledDestination(previous: false)) {
+            case .installed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return .notInstalled }
+            case .discarded:
+                // remove() already cleared the archive and its record; this
+                // install must not put either back.
+                return .notInstalled
+            case .failed:
+                guard compileEpochs[.beatCoreML, default: 0] == epoch else { return .notInstalled }
+                records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
+                saveRecords()
+                return .failed("The beat model downloaded but could not be prepared for Core ML.")
+            }
+        }
         records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
         saveRecords()
         return .installed
@@ -611,14 +998,116 @@ final class AutomixModelStore {
     }
 
     private func hashMatches(_ url: URL, sha256 expected: String) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        hash(of: url) == expected
+    }
+
+    private func hash(of url: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try? handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
-        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        return digest == expected
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Core ML compiler
+
+    /// Extract the archive in a private directory, compile its package, and
+    /// move the result into place. The archive itself stays: an OS update can
+    /// invalidate the compiled model, and the verified bytes are the repair.
+    nonisolated static func compileCoreMLArchive(from archive: URL, to destination: URL) -> Bool {
+        let work = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bitchord-coreml-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+        do {
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+            try extractAppleArchive(archive, into: work)
+            guard let package = coreMLPackage(in: work) else {
+                throw AutomixModelError.noModelInArchive
+            }
+            let compiled = try MLModel.compileModel(at: package)
+            defer { try? FileManager.default.removeItem(at: compiled.deletingLastPathComponent()) }
+            try moveIntoPlace(compiled, destination)
+            return true
+        } catch {
+            os_log(.error, log: automixModelLog, "Automix Core ML: %{public}@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// `aa archive` compresses by default and the release asset may be plain;
+    /// try the plain read first, then the compressed one from an empty
+    /// directory so a partial attempt cannot leak into the retry.
+    nonisolated static func extractAppleArchive(_ archive: URL, into directory: URL) throws {
+        do {
+            try extractArchive(archive, into: directory, compressed: false)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try extractArchive(archive, into: directory, compressed: true)
+        }
+    }
+
+    nonisolated private static func extractArchive(
+        _ archive: URL,
+        into directory: URL,
+        compressed: Bool
+    ) throws {
+        guard let bytes = ArchiveByteStream.fileStream(
+            path: FilePath(archive.path),
+            mode: .readOnly,
+            options: [],
+            permissions: FilePermissions(rawValue: 0o644)
+        ) else {
+            throw AutomixModelError.extractionFailed
+        }
+        defer { try? bytes.close() }
+
+        let source: ArchiveByteStream
+        if compressed {
+            guard let decompressed = ArchiveByteStream.decompressionStream(readingFrom: bytes) else {
+                throw AutomixModelError.extractionFailed
+            }
+            source = decompressed
+        } else {
+            source = bytes
+        }
+        defer { if compressed { try? source.close() } }
+
+        guard let archiveStream = ArchiveStream.decodeStream(readingFrom: source) else {
+            throw AutomixModelError.extractionFailed
+        }
+        defer { try? archiveStream.close() }
+        guard let extractStream = ArchiveStream.extractStream(
+            extractingTo: FilePath(directory.path),
+            flags: [.ignoreOperationNotPermitted]
+        ) else {
+            throw AutomixModelError.extractionFailed
+        }
+        defer { try? extractStream.close() }
+        _ = try ArchiveStream.process(readingFrom: archiveStream, writingTo: extractStream)
+    }
+
+    nonisolated private static func coreMLPackage(in directory: URL) -> URL? {
+        let expected = directory.appendingPathComponent(ModelSpec.coreMLPackageName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: expected.path) { return expected }
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return nil }
+        while let entry = enumerator.nextObject() as? URL {
+            if entry.pathExtension == "mlpackage" { return entry }
+        }
+        return nil
+    }
+
+    nonisolated private static func moveIntoPlace(_ source: URL, _ destination: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: source)
+        } else {
+            try FileManager.default.moveItem(at: source, to: destination)
+        }
     }
 
     // MARK: - Sidecar
@@ -646,11 +1135,17 @@ final class AutomixModelStore {
 
 enum AutomixModelError: LocalizedError {
     case badStatus(Int)
+    case extractionFailed
+    case noModelInArchive
 
     var errorDescription: String? {
         switch self {
         case .badStatus(let code):
             return "The model server answered \(code). Try again in a moment."
+        case .extractionFailed:
+            return "The Core ML archive could not be opened."
+        case .noModelInArchive:
+            return "The Core ML archive did not contain a model."
         }
     }
 }

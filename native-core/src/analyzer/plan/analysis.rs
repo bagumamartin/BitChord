@@ -53,6 +53,11 @@ pub(super) struct Analysis {
     /// Where the strongest analysis for this track came from.
     /// `music_understanding` | `beat_this` | `dsp` | `disk_cache`.
     pub(super) analysis_source: String,
+    /// Which backend produced the beat grid: `coreml`, `rten`, or empty when no
+    /// model grid was used. The cache key already separates the two, and this is
+    /// the record of what a stored analysis actually ran on.
+    #[serde(default)]
+    pub(super) beat_backend: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,6 +455,7 @@ pub(super) fn fill_grid(analysis: &mut Analysis, grid: Grid) {
     analysis.downbeats = grid.downbeats;
     analysis.first_beat = grid.first_beat;
     analysis.beats = grid.beats;
+    analysis.beat_backend = grid.backend.as_str().to_string();
     // The DSP phrases were built on the DSP grid. Eight downbeats is the same
     // 32-beat phrase, on the grid that actually won.
     analysis.phrase_boundaries = analysis.downbeats.iter().step_by(8).copied().collect();

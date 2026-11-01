@@ -142,5 +142,6 @@ fn test_grid(bpm: f64, bars: Vec<f64>, beats: Vec<f64>) -> crate::analyzer::beat
         beat_interval: 60.0 / bpm,
         first_beat: 0.0,
         beat_confidence: 0.8,
+        backend: crate::analyzer::beat::BeatBackend::Rten,
     }
 }

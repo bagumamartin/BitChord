@@ -1,14 +1,15 @@
 #!/bin/bash
 # The Automix model downloads, against a fixture server.
 #
-# The app fetches both graphs at runtime — Beat This! final0 and open-unmix umxhq
-# (both MIT); nothing is bundled. The parts of a download that can fail quietly are
-# the parts a real download almost never shows you: a resumed transfer that starts
-# over, a checksum that lets a truncated graph through, a metered connection that
-# gets used after the listener said no. So this drives all of them through the real
-# store — real URLSession, real SHA-256, real files — against
-# scripts/models-verify/fixture.py, which can be made to lie in the exact ways the
-# code claims to defend against. Both models run the same cases. It also pins the
+# The app fetches every model at runtime — Beat This! final0, its Core ML
+# compilation and open-unmix umxhq (all MIT); nothing is bundled. The parts of a
+# download that can fail quietly are the parts a real download almost never shows
+# you: a resumed transfer that starts over, a checksum that lets a truncated graph
+# through, a metered connection that gets used after the listener said no. So this
+# drives all of them through the real store — real URLSession, real SHA-256, real
+# files, a real Apple Archive — against scripts/models-verify/fixture.py, which can
+# be made to lie in the exact ways the code claims to defend against. Every model
+# runs the same cases. It also pins the
 # migration: the old 113 MB vocal download is removed on the first launch, the
 # current vocals file is not, and a beat-only install leaves vocals notInstalled.
 #
@@ -24,6 +25,17 @@ work="$(mktemp -d)"
 fixture_dir="$work/fixtures"
 mkdir -p "$fixture_dir"
 
+# The third download is an Apple Archive, so its fixture is one too: a tiny
+# archive with the expected directory. The store's compiler is stubbed in the
+# harness — the payload is not a model — but unpacking, verification and the
+# `.mlmodelc` bookkeeping are the real code.
+mkdir -p "$work/coreml-src/BeatThisFinal0.mlpackage"
+printf '{"dummy": true}' > "$work/coreml-src/BeatThisFinal0.mlpackage/Manifest.json"
+/usr/bin/aa archive -a raw -d "$work/coreml-src" -o "$fixture_dir/coreml.aar" || {
+  echo "could not build the Core ML archive fixture" >&2
+  exit 2
+}
+
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 
 python3 "$here/models-verify/fixture.py" --dir "$fixture_dir" --port "$port" \
@@ -38,7 +50,7 @@ trap cleanup EXIT
 
 # Wait for the listener rather than sleeping a fixed amount: a slow machine would
 # otherwise fail this check for being slow, which is not what it is measuring.
-for _ in $(seq 1 50); do
+for _ in $(seq 1 200); do
   if curl -sf --max-time 1 "http://127.0.0.1:$port/count" > /dev/null; then break; fi
   sleep 0.1
 done

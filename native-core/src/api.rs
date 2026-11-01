@@ -277,6 +277,17 @@ pub fn configure_analyzer(beat_model_path: String, vocal_model_path: String) -> 
     crate::analyzer::configure(&beat_model_path, &vocal_model_path)
 }
 
+/// Register or clear the host's accelerated beat backend. `identity` is the
+/// digest of the verified archive the compiled model came from; it joins the
+/// analysis cache key, so an accelerated analysis never aliases an rten one.
+#[uniffi::export]
+pub fn set_beat_accelerator(
+    accelerator: Option<Box<dyn crate::analyzer::BeatAccelerator>>,
+    identity: String,
+) {
+    crate::analyzer::set_beat_accelerator(accelerator, identity)
+}
+
 /// Engine version for the About pane.
 #[uniffi::export]
 pub fn core_version() -> String {

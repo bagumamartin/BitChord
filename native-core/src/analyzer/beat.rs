@@ -2,7 +2,8 @@
 
 use super::models;
 use super::{
-    compute_beat_spectrogram, resample, BEAT_SPECTROGRAM_MELS, BEAT_SPECTROGRAM_SAMPLE_RATE,
+    compute_beat_spectrogram, resample, BeatAccelerator,
+    BEAT_SPECTROGRAM_MELS, BEAT_SPECTROGRAM_SAMPLE_RATE,
 };
 
 use rten_tensor::NdTensor;
@@ -18,6 +19,22 @@ const MIN_TEMPO: f64 = 40.0;
 const MAX_TEMPO: f64 = 220.0;
 const FRAME_RATE: f64 = 50.0;
 
+/// The graph that produced a grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeatBackend {
+    Rten,
+    CoreML,
+}
+
+impl BeatBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rten => "rten",
+            Self::CoreML => "coreml",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Grid {
     pub beats: Vec<f64>,
@@ -26,6 +43,22 @@ pub struct Grid {
     pub beat_interval: f64,
     pub first_beat: f64,
     pub beat_confidence: f64,
+    pub backend: BeatBackend,
+}
+
+/// One inference window and the frames of its output the caller keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Chunk {
+    start: usize,
+    length: usize,
+    keep_from: usize,
+    keep_to: usize,
+}
+
+struct Inference {
+    beat: Vec<f32>,
+    downbeat: Vec<f32>,
+    backend: BeatBackend,
 }
 
 /// Track [pcm] already at any rate; resampled to the model's 22.05 kHz mono.
@@ -80,7 +113,9 @@ fn grid_from_pcm(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<G
     if spectrogram.frames == 0 {
         return None;
     }
-    let (beat_logits, downbeat_logits) = infer(&spectrogram.values, spectrogram.frames)?;
+    let inference = infer(&spectrogram.values, spectrogram.frames)?;
+    let beat_logits = inference.beat;
+    let downbeat_logits = inference.downbeat;
     let beat_frames = pick_peaks(&beat_logits);
     let beats: Vec<f64> = beat_frames
         .iter()
@@ -155,11 +190,157 @@ fn grid_from_pcm(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<G
         beat_confidence: grid_confidence(&beats, &peak_logits),
         beats,
         downbeats,
+        backend: inference.backend,
     })
 }
 
-fn infer(values: &[f32], frames: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-    models::with_beat(|model| infer_chunks(model, values, frames)).flatten()
+fn infer(values: &[f32], frames: usize) -> Option<Inference> {
+    let accelerator = models::accelerator();
+    if let Some(inference) = try_accelerated(values, frames, accelerator.as_deref()) {
+        return Some(inference);
+    }
+    // The rten pass keeps its model lock for the whole track, as before: a
+    // reconfiguration mid-pass must not hand one analysis two different graphs.
+    models::with_beat(|model| infer_chunks(model, values, frames))
+        .flatten()
+        .map(|(beat, downbeat)| Inference {
+            beat,
+            downbeat,
+            backend: BeatBackend::Rten,
+        })
+}
+
+/// Run the whole beat pass on the host backend, or `None` when it cannot run.
+///
+/// The accelerator needs a fixed 1500-frame window, so a shorter track never
+/// reaches it; rten handles those with a variable-length input. A `None` here is
+/// final for the call: the caller discards any logits already produced and
+/// recomputes the track from frame zero on rten.
+fn try_accelerated(
+    values: &[f32],
+    frames: usize,
+    accelerator: Option<&dyn BeatAccelerator>,
+) -> Option<Inference> {
+    if frames < CHUNK_FRAMES {
+        return None;
+    }
+    let accelerator = accelerator?;
+    let inference = infer_accelerated(accelerator, values, frames);
+    if inference.is_none() {
+        log::warn!(
+            "automix: accelerated beat pass failed; the whole track is recomputed on rten"
+        );
+    }
+    inference
+}
+
+fn infer_accelerated(
+    accelerator: &dyn BeatAccelerator,
+    values: &[f32],
+    frames: usize,
+) -> Option<Inference> {
+    let mels = BEAT_SPECTROGRAM_MELS;
+    let plan = accelerator_chunk_plan(frames);
+    if plan.is_empty() {
+        return None;
+    }
+    let mut beat_logits = vec![0.0f32; frames];
+    let mut downbeat_logits = vec![0.0f32; frames];
+    for chunk in plan {
+        let window = values
+            .get(chunk.start * mels..(chunk.start + chunk.length) * mels)?
+            .to_vec();
+        let logits = accelerator.infer(window)?;
+        if logits.beat.len() < chunk.length || logits.downbeat.len() < chunk.length {
+            return None;
+        }
+        for index in chunk.keep_from..chunk.keep_to {
+            let target = chunk.start + index;
+            if target >= frames {
+                break;
+            }
+            let beat = logits.beat[index];
+            let downbeat = logits.downbeat[index];
+            if !beat.is_finite() || !downbeat.is_finite() {
+                return None;
+            }
+            beat_logits[target] = beat;
+            downbeat_logits[target] = downbeat;
+        }
+    }
+    Some(Inference {
+        beat: beat_logits,
+        downbeat: downbeat_logits,
+        backend: BeatBackend::CoreML,
+    })
+}
+
+/// The accelerated chunk plan: as many full windows as rten would use, then one
+/// window right-aligned to the track end.
+///
+/// The final window starts at `frames - CHUNK_FRAMES` instead of running off the
+/// end, because the transformer attends to the whole window and zero-padding the
+/// tail would change what it reads. Its first frames are already covered by the
+/// previous window, so only the uncovered tail is kept; the border stays the
+/// same six frames as everywhere else.
+fn accelerator_chunk_plan(frames: usize) -> Vec<Chunk> {
+    if frames < CHUNK_FRAMES {
+        return Vec::new();
+    }
+    let stride = CHUNK_FRAMES - 2 * BORDER_FRAMES;
+    let mut plan = Vec::new();
+    let mut covered = 0usize;
+    let mut start = 0usize;
+    while start + CHUNK_FRAMES < frames {
+        plan.push(Chunk {
+            start,
+            length: CHUNK_FRAMES,
+            keep_from: if start == 0 { 0 } else { BORDER_FRAMES },
+            keep_to: CHUNK_FRAMES - BORDER_FRAMES,
+        });
+        covered = start + CHUNK_FRAMES - BORDER_FRAMES;
+        start += stride;
+    }
+    let start = frames - CHUNK_FRAMES;
+    let keep_from = if covered == 0 {
+        0
+    } else {
+        BORDER_FRAMES.max(covered.saturating_sub(start))
+    };
+    plan.push(Chunk {
+        start,
+        length: CHUNK_FRAMES,
+        keep_from,
+        keep_to: CHUNK_FRAMES,
+    });
+    plan
+}
+
+/// The rten chunk plan, unchanged: a window every 1488 frames, with the last one
+/// as short as the track needs, and six frames of context trimmed at each
+/// interior edge.
+fn rten_chunk_plan(frames: usize) -> Vec<Chunk> {
+    let stride = CHUNK_FRAMES - 2 * BORDER_FRAMES;
+    let mut plan = Vec::new();
+    let mut start = 0usize;
+    while start < frames {
+        let length = CHUNK_FRAMES.min(frames - start);
+        if length <= 2 * BORDER_FRAMES && start > 0 {
+            break;
+        }
+        let last = start + length >= frames;
+        plan.push(Chunk {
+            start,
+            length,
+            keep_from: if start == 0 { 0 } else { BORDER_FRAMES },
+            keep_to: if last { length } else { length.saturating_sub(BORDER_FRAMES) },
+        });
+        if last {
+            break;
+        }
+        start += stride;
+    }
+    plan
 }
 
 fn infer_chunks(
@@ -167,35 +348,41 @@ fn infer_chunks(
     values: &[f32],
     frames: usize,
 ) -> Option<(Vec<f32>, Vec<f32>)> {
-    let mels = BEAT_SPECTROGRAM_MELS;
     let input_id = *model.input_ids().first()?;
-    let stride = CHUNK_FRAMES - 2 * BORDER_FRAMES;
+    infer_rten_chunks(frames, |start, length| {
+        run_chunk(model, input_id, values, start, length)
+    })
+}
+
+fn run_chunk(
+    model: &rten::Model,
+    input_id: rten::NodeId,
+    values: &[f32],
+    start: usize,
+    length: usize,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    let mels = BEAT_SPECTROGRAM_MELS;
+    let chunk = values.get(start * mels..(start + length) * mels)?.to_vec();
+    let tensor = NdTensor::from_data([1, length, mels], chunk);
+    let outputs = model
+        .run(vec![(input_id, tensor.into())], model.output_ids(), Some(models::run_options()))
+        .ok()?;
+    if outputs.len() < 2 {
+        return None;
+    }
+    Some((flatten_f32(&outputs[0])?, flatten_f32(&outputs[1])?))
+}
+
+fn infer_rten_chunks(
+    frames: usize,
+    mut run: impl FnMut(usize, usize) -> Option<(Vec<f32>, Vec<f32>)>,
+) -> Option<(Vec<f32>, Vec<f32>)> {
     let mut beat_logits = vec![0.0f32; frames];
     let mut downbeat_logits = vec![0.0f32; frames];
-    let mut start = 0usize;
-    while start < frames {
-        let length = CHUNK_FRAMES.min(frames - start);
-        if length <= 2 * BORDER_FRAMES && start > 0 {
-            break;
-        }
-        let chunk = values[start * mels..(start + length) * mels].to_vec();
-        let tensor = NdTensor::from_data([1, length, mels], chunk);
-        let outputs = model
-            .run(vec![(input_id, tensor.into())], model.output_ids(), Some(models::run_options()))
-            .ok()?;
-        if outputs.len() < 2 {
-            return None;
-        }
-        let beat = flatten_f32(&outputs[0])?;
-        let downbeat = flatten_f32(&outputs[1])?;
-        let keep_from = if start == 0 { 0 } else { BORDER_FRAMES };
-        let keep_to = if start + length >= frames {
-            length
-        } else {
-            length.saturating_sub(BORDER_FRAMES)
-        };
-        for index in keep_from..keep_to {
-            let target = start + index;
+    for chunk in rten_chunk_plan(frames) {
+        let (beat, downbeat) = run(chunk.start, chunk.length)?;
+        for index in chunk.keep_from..chunk.keep_to {
+            let target = chunk.start + index;
             if target >= frames {
                 break;
             }
@@ -206,10 +393,6 @@ fn infer_chunks(
                 downbeat_logits[target] = downbeat[index];
             }
         }
-        if start + length >= frames {
-            break;
-        }
-        start += stride;
     }
     Some((beat_logits, downbeat_logits))
 }
@@ -395,6 +578,7 @@ fn median(values: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::BeatLogits;
 
     #[test]
     fn sparse_model_downbeats_are_filled_from_measured_beats() {
@@ -449,6 +633,7 @@ mod tests {
             beat_interval: interval,
             first_beat: 0.0,
             beat_confidence: 0.8,
+            backend: BeatBackend::Rten,
         }
     }
 
@@ -498,5 +683,129 @@ mod tests {
         let whole = grid_at(93.4, 16);
         let chosen = best_grid(Some(whole), || panic!("the head must not be consulted"));
         assert!((chosen.unwrap().bpm - 93.4).abs() < 1e-9);
+    }
+
+    // ---- Accelerated backend ------------------------------------------------
+
+    struct FakeAccelerator {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_at: Option<usize>,
+    }
+
+    impl FakeAccelerator {
+        fn new(fail_at: Option<usize>) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_at,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl BeatAccelerator for FakeAccelerator {
+        fn infer(&self, mel: Vec<f32>) -> Option<BeatLogits> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(mel.len(), CHUNK_FRAMES * BEAT_SPECTROGRAM_MELS);
+            if self.fail_at == Some(call) {
+                return None;
+            }
+            Some(BeatLogits {
+                beat: vec![1.0; CHUNK_FRAMES],
+                downbeat: vec![0.5; CHUNK_FRAMES],
+            })
+        }
+    }
+
+    #[test]
+    fn accelerated_chunks_cover_every_frame_once_and_match_rten_but_for_the_tail() {
+        for frames in [
+            CHUNK_FRAMES,
+            CHUNK_FRAMES + 1,
+            1600,
+            2976,
+            3000,
+            3400,
+            5000,
+        ] {
+            let plan = accelerator_chunk_plan(frames);
+            assert!(!plan.is_empty(), "frames {frames}");
+            assert!(
+                plan.iter().all(|chunk| chunk.length == CHUNK_FRAMES),
+                "frames {frames}: every accelerated window is full length: {plan:?}"
+            );
+            let last = plan.last().unwrap();
+            assert_eq!(
+                last.start + CHUNK_FRAMES,
+                frames,
+                "frames {frames}: the last window is right-aligned"
+            );
+
+            let mut covered = vec![0u8; frames];
+            for chunk in &plan {
+                for frame in chunk.start + chunk.keep_from..chunk.start + chunk.keep_to {
+                    covered[frame] += 1;
+                }
+            }
+            assert!(
+                covered.iter().all(|count| *count == 1),
+                "frames {frames}: every frame is kept exactly once: {plan:?}"
+            );
+
+            let rten = rten_chunk_plan(frames);
+            for (accelerated, regular) in plan.iter().zip(&rten).take(plan.len() - 1) {
+                assert_eq!(
+                    accelerated, regular,
+                    "frames {frames}: everything but the tail matches rten"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_none_mid_track_restarts_the_whole_pass_on_rten() {
+        let frames = 4000;
+        let values = vec![0.0f32; frames * BEAT_SPECTROGRAM_MELS];
+        // The second window fails after the first one produced logits. The
+        // partial result must not survive: the rten retry starts at frame 0.
+        let fake = FakeAccelerator::new(Some(1));
+        assert!(try_accelerated(&values, frames, Some(&fake)).is_none());
+        assert_eq!(fake.calls(), 2, "the failure is mid-track");
+
+        let expected: Vec<(usize, usize)> = rten_chunk_plan(frames)
+            .iter()
+            .map(|chunk| (chunk.start, chunk.length))
+            .collect();
+        let mut starts = Vec::new();
+        let (beat, downbeat) = infer_rten_chunks(frames, |start, length| {
+            starts.push((start, length));
+            Some((vec![1.0f32; length], vec![0.5f32; length]))
+        })
+        .unwrap();
+        assert_eq!(starts, expected, "the fallback is the full rten chunk plan");
+        assert_eq!(starts.first().unwrap().0, 0, "the retry starts at the beginning");
+        assert_eq!(beat.len(), frames);
+        assert_eq!(downbeat.len(), frames);
+    }
+
+    #[test]
+    fn a_short_track_never_reaches_the_accelerator() {
+        let frames = CHUNK_FRAMES - 1;
+        let values = vec![0.0f32; frames * BEAT_SPECTROGRAM_MELS];
+        let fake = FakeAccelerator::new(None);
+        assert!(try_accelerated(&values, frames, Some(&fake)).is_none());
+        assert_eq!(fake.calls(), 0, "a variable-length track stays on rten");
+    }
+
+    #[test]
+    fn coreml_and_rten_analyses_have_different_cache_identities() {
+        let base = "beat=aaaa;vocal=bbbb";
+        let rten = models::compose_identity(base, None);
+        let coreml = models::compose_identity(base, Some("cccc"));
+        assert_eq!(rten, base, "no accelerator keeps the pre-Core ML cache key");
+        assert_ne!(coreml, base, "a Core ML grid must not alias an rten one");
+        assert!(coreml.ends_with("beat_accel=cccc"), "{coreml}");
     }
 }

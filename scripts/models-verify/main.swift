@@ -54,6 +54,25 @@ func temporaryDirectory(_ name: String) -> URL {
     return url
 }
 
+/// The Core ML fixture is a real Apple Archive containing a dummy
+/// `BeatThisFinal0.mlpackage`; the download path stores it, and the compiler
+/// seam stands in for `MLModel.compileModel` because the package is not a model.
+func fixturePath(for id: AutomixModelStore.ModelID) -> String {
+    id == .beatCoreML ? "coreml.aar" : "good.bin"
+}
+
+/// Compiled on the store's utility task, so the stub must be sendable. The
+/// destination is a private scratch directory; the store moves it into place.
+let stubCompiler: @Sendable (URL, URL) -> Bool = { _, destination in
+    try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    return true
+}
+
+@MainActor
+func makeStore(directory: URL, specs: [AutomixModelStore.ModelSpec]) -> AutomixModelStore {
+    AutomixModelStore(directory: directory, specs: specs, compileCoreML: stubCompiler)
+}
+
 func spec(
     _ id: AutomixModelStore.ModelID,
     path: String,
@@ -73,13 +92,14 @@ func spec(
 }
 
 func specName(for id: AutomixModelStore.ModelID) -> String {
-    "\(id.rawValue).fixture"
+    id == .beatCoreML ? "beat_this_final0_coreml.aar" : "\(id.rawValue).fixture"
 }
 
 @MainActor
 func analyzerPath(_ store: AutomixModelStore, _ id: AutomixModelStore.ModelID) -> String {
     switch id {
     case .beat: return store.analyzerPaths.beat
+    case .beatCoreML: return store.beatCoreML?.modelURL.path ?? ""
     case .vocals: return store.analyzerPaths.vocal
     }
 }
@@ -96,6 +116,15 @@ func readFixture() -> Fixture {
     return Fixture(size: storedSize(url), goodSHA: sha256(of: url))
 }
 
+func readCoreMLFixture() -> Fixture {
+    let url = fixtureDirectory.appendingPathComponent("coreml.aar")
+    return Fixture(size: storedSize(url), goodSHA: sha256(of: url))
+}
+
+func fixture(for id: AutomixModelStore.ModelID, _ good: Fixture) -> Fixture {
+    id == .beatCoreML ? coreMLFixture : good
+}
+
 func requestCount() async -> Int {
     guard let (data, _) = try? await URLSession.shared.data(from: baseURL.appendingPathComponent("count")),
           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return -1 }
@@ -107,7 +136,13 @@ guard fixture.size > 0, !fixture.goodSHA.isEmpty else {
     FileHandle.standardError.write(Data("the fixture server did not produce good.bin\n".utf8))
     exit(2)
 }
+let coreMLFixture = readCoreMLFixture()
+guard coreMLFixture.size > 0, !coreMLFixture.goodSHA.isEmpty else {
+    FileHandle.standardError.write(Data("the fixture server did not produce coreml.aar\n".utf8))
+    exit(2)
+}
 print("fixture: \(fixture.size) bytes, sha256 \(fixture.goodSHA.prefix(12))…")
+print("coreml: \(coreMLFixture.size) bytes, sha256 \(coreMLFixture.goodSHA.prefix(12))…")
 
 // MARK: - 1. A good download installs, records, and can be removed
 
@@ -115,9 +150,10 @@ print("\ngood download")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("good-\(id.rawValue)")
     let name = specName(for: id)
-    let store = AutomixModelStore(
+    let bytes = id == .beatCoreML ? coreMLFixture : fixture
+    let store = makeStore(
         directory: directory,
-        specs: [spec(id, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
+        specs: [spec(id, path: fixturePath(for: id), name: name, sha: bytes.goodSHA, size: bytes.size)]
     )
     await store.download(id, allowMetered: true)
 
@@ -125,7 +161,14 @@ for id in AutomixModelStore.ModelID.allCases {
     check("\(id.rawValue) path is reported", store.installedPath(id) != nil)
     check("\(id.rawValue) leaves no part file", !FileManager.default.fileExists(atPath: directory.appendingPathComponent(name + ".part").path))
     check("\(id.rawValue) writes the sidecar", FileManager.default.fileExists(atPath: directory.appendingPathComponent("installed.json").path))
-    check("\(id.rawValue) bytes are counted", store.totalBytesOnDisk == fixture.size, "\(store.totalBytesOnDisk)")
+    check("\(id.rawValue) bytes are counted", store.totalBytesOnDisk == bytes.size, "\(store.totalBytesOnDisk)")
+    if id == .beatCoreML {
+        check(
+            "the Core ML archive is compiled next to it",
+            store.beatCoreML?.modelURL.lastPathComponent == "BeatThisFinal0.mlmodelc"
+                && store.beatCoreML?.identity == bytes.goodSHA
+        )
+    }
 
     // A second download must be a no-op, not a re-fetch.
     let before = await requestCount()
@@ -136,6 +179,14 @@ for id in AutomixModelStore.ModelID.allCases {
     store.remove(id)
     check("\(id.rawValue) remove leaves notInstalled", store.status(of: id) == .notInstalled)
     check("\(id.rawValue) remove deletes the file", store.installedPath(id) == nil)
+    if id == .beatCoreML {
+        check(
+            "remove deletes the compiled model",
+            !FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent("BeatThisFinal0.mlmodelc").path
+            )
+        )
+    }
 }
 
 // MARK: - 1b. A stale install of the same name is not "installed"
@@ -144,19 +195,20 @@ print("\nmigration from a stale graph")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("stale-\(id.rawValue)")
     let name = specName(for: id)
-    let newSpec = spec(id, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)
-    let store = AutomixModelStore(directory: directory, specs: [newSpec])
+    let bytes = id == .beatCoreML ? coreMLFixture : fixture
+    let newSpec = spec(id, path: fixturePath(for: id), name: name, sha: bytes.goodSHA, size: bytes.size)
+    let store = makeStore(directory: directory, specs: [newSpec])
     // The previous small graph: the same file name, a different length, and no
     // record that it was ever verified. It is not usable; remove it.
     let stale = directory.appendingPathComponent(name)
     try Data(repeating: 0xAB, count: 1024).write(to: stale)
-    store.refresh()
+    await store.refresh()
     check("\(id.rawValue) unverified stale graph is not installed", store.status(of: id) == .notInstalled, "\(store.status(of: id))")
     check("\(id.rawValue) unverified stale graph is removed", !FileManager.default.fileExists(atPath: stale.path))
     await store.download(id, allowMetered: true)
     check("\(id.rawValue) new graph installs under the old name", store.status(of: id).isInstalled, "\(store.status(of: id))")
     if let path = store.installedPath(id) {
-        check("\(id.rawValue) installed graph is the new one", sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA)
+        check("\(id.rawValue) installed graph is the new one", sha256(of: URL(fileURLWithPath: path)) == bytes.goodSHA)
     }
 }
 
@@ -166,6 +218,7 @@ print("\nprevious graph stays in use")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("previous-\(id.rawValue)")
     let name = specName(for: id)
+    let bytes = id == .beatCoreML ? coreMLFixture : fixture
     let oldFile = directory.appendingPathComponent(name)
     try Data(repeating: 0x5A, count: 2048).write(to: oldFile)
     let oldSha = sha256(of: oldFile)
@@ -173,31 +226,39 @@ for id in AutomixModelStore.ModelID.allCases {
     let record = "{\"sha256\":\"\(oldSha)\",\"bytes\":2048,\"installedAt\":0}"
     try Data("{\"\(name)\":\(record)}".utf8)
         .write(to: directory.appendingPathComponent("installed.json"))
-    let newSpec = spec(id, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)
-    let store = AutomixModelStore(directory: directory, specs: [newSpec])
-    store.refresh()
+    let newSpec = spec(id, path: fixturePath(for: id), name: name, sha: bytes.goodSHA, size: bytes.size)
+    let store = makeStore(directory: directory, specs: [newSpec])
+    await store.refresh()
     let previous = directory.appendingPathComponent(name + ".prev")
+    let previousModel = directory.appendingPathComponent("BeatThisFinal0.mlmodelc.prev")
     check("\(id.rawValue) old graph is kept as the fallback", FileManager.default.fileExists(atPath: previous.path))
     check("\(id.rawValue) fallback is visible as an update", store.status(of: id) == .outdated, "\(store.status(of: id))")
     check(
         "\(id.rawValue) old graph stays in use until the new one verifies",
-        analyzerPath(store, id) == previous.path
-            && sha256(of: URL(fileURLWithPath: analyzerPath(store, id))) == oldSha,
+        id == .beatCoreML
+            ? store.beatCoreML?.modelURL == previousModel && store.beatCoreML?.identity == oldSha
+            : analyzerPath(store, id) == previous.path
+                && sha256(of: URL(fileURLWithPath: analyzerPath(store, id))) == oldSha,
         analyzerPath(store, id)
     )
 
     // A relaunch rediscovers the parked graph, not just the store that made it.
-    let relaunched = AutomixModelStore(directory: directory, specs: [newSpec])
-    relaunched.refresh()
+    let relaunched = makeStore(directory: directory, specs: [newSpec])
+    await relaunched.refresh()
     check("\(id.rawValue) relaunch still reports the update", relaunched.status(of: id) == .outdated, "\(relaunched.status(of: id))")
-    check("\(id.rawValue) relaunch still uses the old graph", analyzerPath(relaunched, id) == previous.path)
+    check(
+        "\(id.rawValue) relaunch still uses the old graph",
+        id == .beatCoreML
+            ? relaunched.beatCoreML?.modelURL == previousModel && relaunched.beatCoreML?.identity == oldSha
+            : analyzerPath(relaunched, id) == previous.path
+    )
 
     // A failed replacement download must not take the working graph away.
-    let failing = AutomixModelStore(
+    let failing = makeStore(
         directory: directory,
-        specs: [spec(id, path: "corrupt.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
+        specs: [spec(id, path: "corrupt.bin", name: name, sha: bytes.goodSHA, size: bytes.size)]
     )
-    failing.refresh()
+    await failing.refresh()
     await failing.download(id, allowMetered: true)
     check("\(id.rawValue) failed update is reported", {
         if case .failed = failing.status(of: id) { return true }
@@ -206,7 +267,9 @@ for id in AutomixModelStore.ModelID.allCases {
     check(
         "\(id.rawValue) failed download keeps the old graph",
         FileManager.default.fileExists(atPath: previous.path)
-            && analyzerPath(failing, id) == previous.path
+            && (id == .beatCoreML
+                ? failing.beatCoreML?.modelURL == previousModel && failing.beatCoreML?.identity == oldSha
+                : analyzerPath(failing, id) == previous.path)
             && failing.isUsingPreviousGraph(id)
     )
 
@@ -216,8 +279,15 @@ for id in AutomixModelStore.ModelID.allCases {
     check("\(id.rawValue) fallback is removed once the replacement verifies", !FileManager.default.fileExists(atPath: previous.path))
     if let path = relaunched.installedPath(id) {
         check(
+            "\(id.rawValue) installed archive hashes correctly",
+            sha256(of: URL(fileURLWithPath: path)) == bytes.goodSHA
+        )
+        check(
             "\(id.rawValue) analyser points at the new graph",
-            analyzerPath(relaunched, id) == path && sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA
+            id == .beatCoreML
+                ? relaunched.beatCoreML?.modelURL.lastPathComponent == "BeatThisFinal0.mlmodelc"
+                    && relaunched.beatCoreML?.identity == bytes.goodSHA
+                : analyzerPath(relaunched, id) == path
         )
     }
 }
@@ -243,14 +313,14 @@ do {
     try Data("{\"\(beatName)\":\(beatRecord),\"vocals_umxhq.onnx\":\(legacyRecord)}".utf8)
         .write(to: directory.appendingPathComponent("installed.json"))
 
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [
             spec(.beat, path: "good.bin", name: beatName, sha: fixture.goodSHA, size: fixture.size),
             spec(.vocals, path: "good.bin", name: specName(for: .vocals), sha: fixture.goodSHA, size: fixture.size),
         ]
     )
-    store.refresh()
+    await store.refresh()
     check("the old vocal download is removed", !FileManager.default.fileExists(atPath: legacy.path))
     check("its resume file is removed", !FileManager.default.fileExists(atPath: part.path))
     check("its fallback is removed", !FileManager.default.fileExists(atPath: previous.path))
@@ -280,11 +350,11 @@ do {
     try Data("{\"\(newName)\":\(newRecord),\"vocals_umxhq.onnx\":\(legacyRecord)}".utf8)
         .write(to: directory.appendingPathComponent("installed.json"))
 
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [spec(.vocals, path: "good.bin", name: newName, sha: fixture.goodSHA, size: fixture.size)]
     )
-    store.refresh()
+    await store.refresh()
     check("the current vocals download is kept", store.status(of: .vocals).isInstalled)
     check("the current vocals file is still on disk", FileManager.default.fileExists(atPath: newFile.path))
     check("the old 113 MB file is still removed", !FileManager.default.fileExists(atPath: legacy.path))
@@ -296,7 +366,7 @@ print("\nchecksum mismatch")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("corrupt-\(id.rawValue)")
     let name = specName(for: id)
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [spec(id, path: "corrupt.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
     )
@@ -318,7 +388,7 @@ print("\ninterrupted transfer")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("resume-\(id.rawValue)")
     let name = specName(for: id)
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [spec(id, path: "cut.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
     )
@@ -347,7 +417,7 @@ print("\nmetered gate")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("metered-\(id.rawValue)")
     let name = specName(for: id)
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [spec(id, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
     )
@@ -369,7 +439,7 @@ print("\nverify")
 for id in AutomixModelStore.ModelID.allCases {
     let directory = temporaryDirectory("verify-\(id.rawValue)")
     let name = specName(for: id)
-    let store = AutomixModelStore(
+    let store = makeStore(
         directory: directory,
         specs: [spec(id, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
     )
@@ -382,9 +452,12 @@ for id in AutomixModelStore.ModelID.allCases {
     bytes[0] ^= 0xFF
     try Data(bytes).write(to: file)
 
-    let survived = store.verify(id)
+    let survived = await store.verify(id)
     check("\(id.rawValue) verify rejects the file", !survived)
     check("\(id.rawValue) rejected file is removed", store.installedPath(id) == nil)
+    if id == .beatCoreML {
+        check("the rejected archive's compiled model is removed", store.beatCoreML == nil)
+    }
     if case .failed = store.status(of: id) { check("\(id.rawValue) status explains it", true) } else {
         check("\(id.rawValue) status explains it", false, "\(store.status(of: id))")
     }

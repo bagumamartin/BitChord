@@ -83,7 +83,7 @@ struct LicenseAcknowledgementsView: View {
         ),
         .init(
             name: "Automix model weights",
-            detail: "The Beat This! and open-unmix vocal graphs are downloaded on demand from the project's GitHub releases; both are MIT-licensed. Beat This! notes that some training data may carry separate terms.",
+            detail: "The Beat This! and open-unmix vocal graphs, and the Core ML compilation of the same Beat This! checkpoint, are downloaded on demand from the project's GitHub releases; all are MIT-licensed. Beat This! notes that some training data may carry separate terms.",
             license: "MIT",
             file: "MIT-Model-Weights.txt",
             url: "https://github.com/bagumamartin/BitChord/blob/main/THIRD_PARTY_NOTICES.md"

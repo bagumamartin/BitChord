@@ -211,15 +211,22 @@ extension SettingsView {
         let store = AutomixModelStore.shared
         // A verified previous graph is still a working model: say so, and say that
         // an update is waiting, rather than calling the pair "not installed".
-        if store.isUsingPreviousGraph(.beat) || store.isUsingPreviousGraph(.vocals) {
+        if store.isUsingPreviousGraph(.beat) || store.isUsingPreviousGraph(.beatCoreML) || store.isUsingPreviousGraph(.vocals) {
             return "Update available. Using the previous version — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
         }
         let beat = store.status(of: .beat).isInstalled
         let vocals = store.status(of: .vocals).isInstalled
+        let accelerated = store.status(of: .beatCoreML).isInstalled
         switch (beat, vocals) {
         case (true, true):
+            if accelerated {
+                return "Beat, downbeat and vocal models installed, accelerated by Core ML — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
+            }
             return "Beat, downbeat and vocal models installed — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
         case (true, false):
+            if accelerated {
+                return "Beat model installed with Core ML acceleration; vocal detection can be added for vocal-clash avoidance"
+            }
             return "Beat model installed; vocal detection can be added for vocal-clash avoidance"
         case (false, true):
             return "Vocal model installed — without the beat model Automix falls back to tempo analysis"
