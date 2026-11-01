@@ -3,7 +3,7 @@
 use super::state::{MixerState, Phase};
 use super::types::Command;
 use super::voice::Voice;
-use super::{accepts_analyzed_plan, loudness_gain, NerdSnapshot, QueuedTrack};
+use super::{accepts_analyzed_plan, loudness_gain, NerdSnapshot, QueuedTrack, TransitionStyle};
 use crate::eq::EqCurve;
 use crate::sound::{LoudnessMode, Protector, SoundMode};
 use rtrb::Producer;
@@ -126,10 +126,11 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                 .is_some_and(|c| c.info.source == request.source)
             {
                 // Same path as the playing voice is normally a duplicate and is
-                // dropped. A planned fade is the repeat-one / single-item
-                // repeat-all self-mix: open a second reader on the same file and
-                // blend the track into itself.
-                if request.plan.fade_seconds > 0.0 {
+                // dropped. An explicit gapless plan is a non-Automix loop;
+                // a planned fade is an Automix self-mix. Both need a second
+                // reader so the output survives EOS without a fresh load.
+                if request.plan.fade_seconds > 0.0 || request.plan.style == TransitionStyle::Gapless
+                {
                     log::info!(
                         "queued self-mix for {} fade={:.1}s",
                         request.title,

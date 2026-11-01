@@ -14,6 +14,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.forms.FormDataContent
 import io.ktor.client.request.get
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
@@ -271,6 +272,8 @@ actual object Http {
             status = response.status.value,
             body = bytes,
             contentType = response.headers[io.ktor.http.HttpHeaders.ContentType],
+            contentRange = response.headers[io.ktor.http.HttpHeaders.ContentRange],
+            contentLength = response.headers[io.ktor.http.HttpHeaders.ContentLength]?.toLongOrNull(),
         )
     }
 
@@ -343,13 +346,13 @@ actual object Http {
         maxBytes: Int,
         timeoutMillis: Long,
     ): RawHttpBytes {
-        val response = client.get(url) {
+        return client.prepareGet(url) {
             timeout {
                 requestTimeoutMillis = timeoutMillis
                 connectTimeoutMillis = 20_000
             }
             headers.forEach { (key, value) -> header(key, value) }
-        }
+        }.execute { response ->
         val bytes = if (maxBytes >= Int.MAX_VALUE) {
             runCatching { response.bodyAsBytes() }.getOrNull()
         } else {
@@ -362,15 +365,20 @@ actual object Http {
                 val taken = channel.readRemaining(maxBytes.toLong()).readByteArray()
                 channel.cancel(null)
                 taken
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 null
             }
         }
-        return RawHttpBytes(
+        RawHttpBytes(
             status = response.status.value,
             body = bytes,
             contentType = response.headers[io.ktor.http.HttpHeaders.ContentType],
+            contentRange = response.headers[io.ktor.http.HttpHeaders.ContentRange],
+            contentLength = response.headers[io.ktor.http.HttpHeaders.ContentLength]?.toLongOrNull(),
         )
+        }
     }
 
     actual fun setHostCookies(originUrl: String, cookies: Map<String, String>) {

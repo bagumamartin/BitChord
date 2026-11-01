@@ -65,6 +65,13 @@ object StreamDownloadBridge {
     fun interface DownloadCallback {
         fun onResult(path: String?, message: String?)
     }
+    fun interface ProgressCallback {
+        fun onProgress(received: Long, total: Long)
+    }
+
+    fun downloadWithProgress(downloadId: String, url: String, headers: Map<String, String>, progress: ProgressCallback, callback: DownloadCallback) {
+        startStream(downloadId, url, headers, ready = DownloadCallback { _, _ -> }, done = callback, progress = progress)
+    }
 
     /** Wait for the whole file, then [callback]. Prefetch / cache path. */
     fun download(downloadId: String, url: String, headers: Map<String, String>, callback: DownloadCallback) {
@@ -108,7 +115,27 @@ object StreamDownloadBridge {
         ready: DownloadCallback,
         done: DownloadCallback,
     ) {
-        startStream(null, url, headers, ready, done, videoId = null, maxKbps = Int.MAX_VALUE)
+        DirectStreamDownload.create(bridgeScope, url, headers, ready, done).start()
+    }
+
+    fun streamSourceRequest(requestId: String, url: String, headers: Map<String, String>, ready: DownloadCallback, done: DownloadCallback) {
+        val job = DirectStreamDownload.create(bridgeScope, url, headers, ready, done)
+        register(requestId, job)
+        job.start()
+    }
+
+    fun streamTrackRequest(requestId: String, videoId: String, maxKbps: Int, url: String, headers: Map<String, String>,
+                           expectedMimeType: String?, firstRangeRetry: Int, ready: DownloadCallback, done: DownloadCallback) {
+        startStream(requestId, url, headers, ready, done, videoId, maxKbps, expectedMimeType, firstRangeRetry)
+    }
+
+    private fun register(id: String, job: Job) {
+        jobsLock.lock(); downloadJobs[id] = job; jobsLock.unlock()
+        job.invokeOnCompletion {
+            jobsLock.lock()
+            if (downloadJobs[id] === job) downloadJobs.remove(id)
+            jobsLock.unlock()
+        }
     }
 
     /**
@@ -143,6 +170,15 @@ object StreamDownloadBridge {
     }
 
     private val networkGeneration = MutableStateFlow(0L)
+    private val networkAvailable = MutableStateFlow(true)
+    internal suspend fun awaitConnectivity() { networkAvailable.first { it } }
+
+    fun networkStatus(available: Boolean) {
+        if (networkAvailable.value != available) {
+            networkAvailable.value = available
+            networkChanged()
+        }
+    }
 
     private class NetworkChanged : Exception("network path changed")
 
@@ -150,10 +186,10 @@ object StreamDownloadBridge {
      * One range, abandoned early if the network path changes underneath it.
      * Returns null when it was abandoned for that reason.
      */
-    private suspend fun fetchRange(url: String, headers: Map<String, String>): ByteArray? {
+    private suspend fun fetchRange(url: String, headers: Map<String, String>, maxBytes: Int): RawHttpBytes? {
         val startGeneration = networkGeneration.value
         return coroutineScope {
-            val fetch = async { Http.getBytes(url, headers, CHUNK_TIMEOUT_MS) }
+            val fetch = async { Http.getBytesRaw(url, headers, maxBytes, CHUNK_TIMEOUT_MS) }
             val watcher = launch {
                 networkGeneration.first { it != startGeneration }
                 fetch.cancel(CancellationException("network changed"))
@@ -206,6 +242,7 @@ object StreamDownloadBridge {
         maxKbps: Int = Int.MAX_VALUE,
         expectedMimeType: String? = null,
         firstRangeRetry: Int = 0,
+        progress: ProgressCallback? = null,
     ) {
         val job = bridgeScope.launch(start = CoroutineStart.LAZY) {
             var tmpPath: String? = null
@@ -215,8 +252,9 @@ object StreamDownloadBridge {
 
                 var currentUrl = url
                 var currentHeaders = headers
-                val chunkSize = PlayerClient.rangeBytesFor(url)
-                val declaredLength = PlayerClient.lengthFromUrl(url)
+                val chunkSize = minOf(PlayerClient.rangeBytesFor(url), 1024L * 1024)
+                var declaredLength = PlayerClient.lengthFromUrl(url)
+                check(declaredLength == null || declaredLength in 1..MAX_BYTES) { "Invalid audio download size" }
                 val tmpDir = NSTemporaryDirectory()
                 val ext = when {
                     url.contains("mime=video", ignoreCase = true) ||
@@ -253,10 +291,14 @@ object StreamDownloadBridge {
                 var remints = 0
 
                 while (true) {
+                    networkAvailable.first { it }
+                    currentCoroutineContext().ensureActive()
                     // The first range is small so the decoder has its header and
                     // first frames in a fraction of the time a full range takes;
                     // first sound waits on this one request and nothing else.
-                    val want = if (offset == 0L) minOf(FIRST_RANGE_BYTES, chunkSize) else chunkSize
+                    val want = minOf(if (offset == 0L) minOf(FIRST_RANGE_BYTES, chunkSize) else chunkSize,
+                        declaredLength?.let { it - offset } ?: chunkSize)
+                    check(want > 0) { "Invalid audio range offset" }
                     val rangeEnd = offset + want - 1
                     val rangeHeaders = currentHeaders + ("Range" to "bytes=$offset-$rangeEnd")
 
@@ -265,9 +307,13 @@ object StreamDownloadBridge {
                             val response = fetchFirstRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
                             if (response.status in REFUSAL_CODES) throw HttpStatusException(response.status)
                             if (response.status !in 200..299) throw HttpStatusException(response.status)
-                            validateFirstMediaRange(response, expectedMimeType)
+                            val bytes = validateFirstMediaRange(response, expectedMimeType)
+                            declaredLength = validateAppendedRange(response, offset, want, declaredLength)
+                            bytes
                         } else {
-                            fetchRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
+                            val response = fetchRange(currentUrl, rangeHeaders, want.toInt() + 1) ?: throw NetworkChanged()
+                            declaredLength = validateAppendedRange(response, offset, want, declaredLength)
+                            response.body!!
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -283,6 +329,8 @@ object StreamDownloadBridge {
                             throw e
                         }
                         if (e is InvalidFirstMediaRangeException) throw e
+                        if (e is InvalidMediaRangeException) throw e
+                        if (!networkAvailable.value || e is NetworkChanged) continue
                         if (code != null && code in REFUSAL_CODES) {
                             DebugLog.w("stream refused with $code at offset $offset")
                             StreamResolver.onPlaybackRefused(currentUrl, code)
@@ -318,7 +366,7 @@ object StreamDownloadBridge {
                     if (data.isEmpty()) {
                         consecutiveEmpty++
                         DebugLog.d("stream returned an empty chunk ($consecutiveEmpty), stopping")
-                        if (consecutiveEmpty >= 2) break
+                        if (consecutiveEmpty >= 2) error("Audio ended before its declared length")
                         continue
                     }
                     consecutiveEmpty = 0
@@ -340,6 +388,7 @@ object StreamDownloadBridge {
                     }
                     fflush(file)
                     offset += data.size
+                    progress?.onProgress(offset, declaredLength ?: 0)
 
                     if (!readyFired) {
                         currentCoroutineContext().ensureActive()
@@ -353,7 +402,7 @@ object StreamDownloadBridge {
                     if (declaredLength != null) {
                         if (offset >= declaredLength) break
                     } else if (data.size < want) break
-                    if (offset > MAX_BYTES) break
+                    check(offset <= MAX_BYTES) { "Audio exceeds the download size limit" }
                 }
 
                 file?.let { fflush(it); fclose(it) }
@@ -366,6 +415,7 @@ object StreamDownloadBridge {
                 }
 
                 currentCoroutineContext().ensureActive()
+                check(declaredLength == null || offset == declaredLength) { "Incomplete audio download" }
                 NSMutableData().writeToFile("$path.complete", atomically = true)
                 DebugLog.d("stream complete: $path ($offset bytes)")
                 currentCoroutineContext().ensureActive()
@@ -378,6 +428,7 @@ object StreamDownloadBridge {
                         NSFileManager.defaultManager.removeItemAtPath(it, null)
                     }
                 }
+                done.onResult(null, "Download cancelled")
             } catch (e: Throwable) {
                 currentCoroutineContext().ensureActive()
                 DebugLog.e("stream failed", e)

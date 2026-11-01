@@ -244,7 +244,16 @@ fn gapless_queue_advances_and_fires_handoff() {
 /// into itself instead of stopping at EOS.
 #[test]
 fn a_planned_self_mix_is_accepted_and_hands_off() {
-    let dir = std::env::temp_dir().join("bitchord-mixer-self-mix");
+    check_self_handoff(false);
+}
+
+#[test]
+fn an_explicit_gapless_repeat_is_accepted_and_hands_off() {
+    check_self_handoff(true);
+}
+
+fn check_self_handoff(gapless: bool) {
+    let dir = std::env::temp_dir().join(format!("bitchord-mixer-self-mix-{gapless}"));
     std::fs::create_dir_all(&dir).unwrap();
     let a = dir.join("loop.wav");
     test_wav(&a, 3.0, 440.0);
@@ -303,7 +312,12 @@ fn a_planned_self_mix_is_accepted_and_hands_off() {
             artist: String::new(),
             start_seconds: 0.0,
             plan: TransitionPlan {
-                fade_seconds: 1.0,
+                style: if gapless {
+                    TransitionStyle::Gapless
+                } else {
+                    TransitionStyle::EqualPower
+                },
+                fade_seconds: if gapless { 0.0 } else { 1.0 },
                 effect_seconds: 0.0,
                 effect_start_seconds: 0.0,
                 ..TransitionPlan::default()

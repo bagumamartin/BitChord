@@ -199,7 +199,10 @@ expect object Http {
 
 data class RawHttpText(val status: Int, val body: String?)
 
-data class RawHttpBytes(val status: Int, val body: ByteArray?, val contentType: String? = null)
+data class RawHttpBytes(
+    val status: Int, val body: ByteArray?, val contentType: String? = null,
+    val contentRange: String? = null, val contentLength: Long? = null,
+)
 
 /** [Http.probe]'s verdict input; the classification happens where it is read. */
 data class ProbeResult(
