@@ -23,23 +23,20 @@ fn automix_corpus_scorecard() {
             PathBuf::from(std::env::var("HOME").unwrap_or_default())
                 .join("Library/Caches/BitChord/audio")
         });
-    let models = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join("Library/Application Support/BitChord/Models");
+    // The app downloads both graphs into its own Application Support store;
+    // development builds and this scorecard read the fetched cache instead.
+    // `scripts/fetch-automix-models.sh` fills it, and the assertions below make
+    // a run without either graph fail rather than silently measure the DSP
+    // fallback.
+    let models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
     // A model comparison is a different graph on the same corpus, so the
-    // test can be pointed at one without touching the owner's install.
+    // test can be pointed at one without touching the cache.
     let beat = std::env::var("AUTOMIX_BEAT_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|_| models.join("beat_this.onnx"));
-    // The vocals graph ships inside the app (AppleApp/Resources/Models), not
-    // in the model store: the store deletes the old 113 MB download. Looking
-    // for that file is how this scorecard ran with no models at all while
-    // the devices ran both.
     let vocals = std::env::var("AUTOMIX_VOCALS_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../AppleApp/Resources/Models/vocals_umxhq_int8.onnx")
-        });
+        .unwrap_or_else(|_| models.join("vocals_umxhq_int8.onnx"));
     assert!(
         beat.exists(),
         "automix corpus: no beat model at {}",

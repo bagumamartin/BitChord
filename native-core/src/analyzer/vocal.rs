@@ -1,5 +1,6 @@
-//! Port of upstream `VocalSpectrogram` + `VocalTracker.kt`, reading the bundled
-//! open-unmix **umxhq** vocals graph (`AppleApp/Resources/Models/vocals_umxhq_int8.onnx`).
+//! Port of upstream `VocalSpectrogram` + `VocalTracker.kt`, reading the
+//! open-unmix **umxhq** vocals graph downloaded from the project's GitHub
+//! releases (`vocals_umxhq_int8.onnx`). No model graph is bundled.
 //!
 //! The graph is an ONNX export of the official sigsep umxhq vocals checkpoint
 //! (MIT), fixed at `[1, 2, 2049, 960]` magnitude spectrogram → vocals magnitude

@@ -2,7 +2,7 @@
 """HTTP fixture for scripts/check-models.sh.
 
 Serves three deterministic files so the model store's download path can be driven
-through the states that matter without touching Hugging Face:
+through the states that matter without touching the project's release assets:
 
   /good.bin     a well-behaved file, Range-aware
   /corrupt.bin  the same length, different bytes — a transport that succeeded and a
@@ -25,7 +25,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Large enough that CFNetwork delivers several chunks before the cut, which is
-# what a real 113 MB transfer looks like. A body small enough to sit in one
+# what a real 23 MB transfer looks like. A body small enough to sit in one
 # buffer can be dropped whole when the connection dies, and then the test would
 # be measuring the socket, not the resume.
 SIZE = 4 * 1024 * 1024

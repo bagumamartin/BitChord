@@ -54,7 +54,8 @@ rtrb = "0.3"
 
 # ONNX inference for Automix (Beat This! + open-unmix). Pure-Rust runtime so
 # the same staticlib links on macOS, iOS, and the iOS simulator — no extra
-# onnxruntime xcframework. Same graphs upstream ships; rten is the engine.
+# onnxruntime xcframework. The app downloads both graphs at runtime from the
+# project's GitHub releases; rten is the engine.
 rten = "0.26"
 rten-tensor = "0.26"
 sha2 = "0.10"

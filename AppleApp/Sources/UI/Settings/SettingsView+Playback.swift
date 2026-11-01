@@ -210,14 +210,22 @@ extension SettingsView {
     private static var automixModelsSubtitle: String {
         let store = AutomixModelStore.shared
         // A verified previous graph is still a working model: say so, and say that
-        // an update is waiting, rather than calling it "not installed".
-        if store.isUsingPreviousGraph(.beat) {
+        // an update is waiting, rather than calling the pair "not installed".
+        if store.isUsingPreviousGraph(.beat) || store.isUsingPreviousGraph(.vocals) {
             return "Update available. Using the previous version — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
         }
-        if store.status(of: .beat).isInstalled {
-            return "Beat and downbeat model installed — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk · vocal detection is built in"
+        let beat = store.status(of: .beat).isInstalled
+        let vocals = store.status(of: .vocals).isInstalled
+        switch (beat, vocals) {
+        case (true, true):
+            return "Beat, downbeat and vocal models installed — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
+        case (true, false):
+            return "Beat model installed; vocal detection can be added for vocal-clash avoidance"
+        case (false, true):
+            return "Vocal model installed — without the beat model Automix falls back to tempo analysis"
+        case (false, false):
+            return "Not installed — Automix falls back to tempo analysis"
         }
-        return "Not installed — Automix falls back to tempo analysis · vocal detection is built in"
     }
 
     // MARK: - Appearance

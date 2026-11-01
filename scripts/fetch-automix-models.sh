@@ -1,47 +1,58 @@
 #!/usr/bin/env bash
-# Fetch the development/CI beat graph into AppleApp/Resources/Models/.
-# The app downloads the full Beat This! final0 graph at runtime; this small0
-# graph is the bundle fallback for a dev box / CI build without a network step
-# (same I/O contract: mel [1, T, 128] -> two logit heads). The vocals graph is
-# NOT fetched: it is bundled and committed as
-# AppleApp/Resources/Models/vocals_umxhq_int8.onnx (open-unmix umxhq, MIT; see
-# THIRD_PARTY_NOTICES.md) because the app needs it on every device.
+# Fetch the development/CI Automix graphs into native-core/fixtures/models/.
 #
-# Pinned to a revision and checked against a SHA-256, the same fact the app
-# itself downloads by (see AutomixModelStore.swift). A branch can move and a tag
-# can be re-pointed; a commit and a digest cannot, and a dev box and a listener's
-# device must end up with the same bytes or parity claims mean nothing.
+# The app downloads both graphs at runtime from the project's GitHub release
+# assets; nothing is bundled, so this cache lives outside AppleApp/Resources and
+# a dev-box fetch can never end up inside an .app. The tests in models.rs and
+# the corpus scorecard read the same directory by default.
+#
+# Pinned to release tags and checked against the length and SHA-256 the app
+# itself verifies (see AutomixModelStore.swift). A tag can be re-pointed; a
+# digest and a byte count cannot, and a dev box and a listener's device must end
+# up with the same bytes or parity claims mean nothing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$ROOT/AppleApp/Resources/Models"
+DEST="$ROOT/native-core/fixtures/models"
 mkdir -p "$DEST"
 
-# Pinned Hugging Face revision. The repository declares MIT.
-BEAT_URL="https://huggingface.co/ashudesai/songbird-models/resolve/345312bf5604913b3c0d05815f93c81c4b114e4d/small0.onnx"
+# Beat This! final0, dynamic int8 (CPJKU, MIT).
+BEAT_URL="https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-v1/beat_this_full_int8.onnx"
+BEAT_SHA="9f10e5efa37d3e120da2121141825fe54b23b487b32dd25a54f89039fd8f85cb"
+BEAT_BYTES=23478460
 
-BEAT_SHA="c462b064a4033050ca6a5354bf866ff4610ab1fd8f1dec1e494b20b22d870aea"
+# open-unmix umxhq vocals, dynamic int8 on MatMul/Gemm only (SigSep/Inria, MIT).
+VOCALS_URL="https://github.com/bagumamartin/BitChord/releases/download/model-umxhq-vocals-v1/vocals_umxhq_int8.onnx"
+VOCALS_SHA="7eba6bebce0cc2e2d3b5c0e490a8074e66ce27f64170c6802b245740dcaf21ef"
+VOCALS_BYTES=23209009
 
 fetch() {
-  local url="$1" out="$2" want="$3"
-  if [[ -s "$out" ]] && [[ "$(shasum -a 256 "$out" | awk '{print $1}')" == "$want" ]]; then
-    echo "already present and verified: $out"
-    return
+  local url="$1" out="$2" want_sha="$3" want_bytes="$4"
+  if [[ -s "$out" ]]; then
+    local got_sha got_bytes
+    got_sha="$(shasum -a 256 "$out" | awk '{print $1}')"
+    got_bytes="$(stat -f%z "$out")"
+    if [[ "$got_sha" == "$want_sha" && "$got_bytes" == "$want_bytes" ]]; then
+      echo "already present and verified: $out"
+      return
+    fi
   fi
   echo "downloading $(basename "$out")…"
   curl -L --fail --retry 3 -o "$out.tmp" "$url"
-  local got
-  got="$(shasum -a 256 "$out.tmp" | awk '{print $1}')"
-  if [[ "$got" != "$want" ]]; then
+  local got_sha got_bytes
+  got_sha="$(shasum -a 256 "$out.tmp" | awk '{print $1}')"
+  got_bytes="$(stat -f%z "$out.tmp")"
+  if [[ "$got_sha" != "$want_sha" || "$got_bytes" != "$want_bytes" ]]; then
     rm -f "$out.tmp"
-    echo "checksum mismatch for $(basename "$out")" >&2
-    echo "  expected $want" >&2
-    echo "  got      $got" >&2
+    echo "checksum or size mismatch for $(basename "$out")" >&2
+    echo "  expected $want_bytes bytes, sha256 $want_sha" >&2
+    echo "  got      $got_bytes bytes, sha256 $got_sha" >&2
     exit 1
   fi
   mv "$out.tmp" "$out"
   echo "verified $(basename "$out")"
 }
 
-fetch "$BEAT_URL" "$DEST/beat_this.onnx" "$BEAT_SHA"
+fetch "$BEAT_URL" "$DEST/beat_this.onnx" "$BEAT_SHA" "$BEAT_BYTES"
+fetch "$VOCALS_URL" "$DEST/vocals_umxhq_int8.onnx" "$VOCALS_SHA" "$VOCALS_BYTES"
 ls -lh "$DEST"/*.onnx

@@ -71,9 +71,19 @@ struct AutomixModelRow: View {
         .padding(.vertical, 4)
     }
 
-    private var iconName: String { "metronome" }
+    private var iconName: String {
+        switch id {
+        case .beat: return "metronome"
+        case .vocals: return "waveform.badge.mic"
+        }
+    }
 
-    private var iconColor: Color { .blue }
+    private var iconColor: Color {
+        switch id {
+        case .beat: return .blue
+        case .vocals: return .purple
+        }
+    }
 
     @ViewBuilder
     private func controls(spec: AutomixModelStore.ModelSpec, status: AutomixModelStore.Status) -> some View {
@@ -307,17 +317,42 @@ private struct AutomixModelCard: View {
         }
     }
 
-    private var cardTitle: String { "Beat Detection" }
-
-    private var cardSubtitle: String { "Beat This! AI" }
-
-    private var cardDescription: String {
-        "Analyzes beat grids and downbeats so song transitions land perfectly in time with the music."
+    private var cardTitle: String {
+        switch id {
+        case .beat: return "Beat Detection"
+        case .vocals: return "Vocal Detection"
+        }
     }
 
-    private var iconName: String { "metronome" }
+    private var cardSubtitle: String {
+        switch id {
+        case .beat: return "Beat This! AI"
+        case .vocals: return "open-unmix umxhq"
+        }
+    }
 
-    private var iconBgColor: Color { .blue }
+    private var cardDescription: String {
+        switch id {
+        case .beat:
+            return "Analyzes beat grids and downbeats so song transitions land perfectly in time with the music."
+        case .vocals:
+            return "Finds the singing at the start and end of each track so two vocals do not overlap during a transition."
+        }
+    }
+
+    private var iconName: String {
+        switch id {
+        case .beat: return "metronome"
+        case .vocals: return "waveform.badge.mic"
+        }
+    }
+
+    private var iconBgColor: Color {
+        switch id {
+        case .beat: return .blue
+        case .vocals: return .purple
+        }
+    }
 
     @ViewBuilder
     private func trailingIndicator(spec: AutomixModelStore.ModelSpec, status: AutomixModelStore.Status) -> some View {
@@ -428,6 +463,7 @@ struct AutomixModelsSheet: View {
                         // Model Cards
                         VStack(spacing: 12) {
                             AutomixModelCard(id: .beat, store: store)
+                            AutomixModelCard(id: .vocals, store: store)
                         }
                         .padding(.horizontal, 20)
 
@@ -437,11 +473,11 @@ struct AutomixModelsSheet: View {
                                 Image(systemName: "lock.shield.fill")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                Text("23.5 MB beat model · Vocal detection built in · 100% on-device")
+                                Text("46.7 MB of models · Runs 100% on-device · Private")
                                     .font(.caption2.weight(.medium))
                                     .foregroundStyle(.secondary)
                             }
-                            Text("The beat model is downloaded once and verified via SHA-256. Vocal detection ships with the app. Manage anytime in Settings.")
+                            Text("Models are downloaded once and verified via SHA-256. Manage anytime in Settings.")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                                 .multilineTextAlignment(.center)
@@ -524,7 +560,7 @@ struct AutomixModelsSheet: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             } else {
-                Button("Download Beat Model (~23.5 MB)") {
+                Button("Download Models (~46.7 MB)") {
                     downloadAllMissing()
                 }
                 .buttonStyle(.borderedProminent)
@@ -565,7 +601,7 @@ struct AutomixModelsSheet: View {
                 Button {
                     downloadAllMissing()
                 } label: {
-                    Text("Download Beat Model (~23.5 MB)")
+                    Text("Download Models (~46.7 MB)")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
@@ -635,7 +671,7 @@ struct AutomixModelsPage: View {
             } header: {
                 Text("Models")
             } footer: {
-                Text("Downloaded once and kept in BitChord's storage. Removing the beat model takes effect immediately: Automix falls back to tempo analysis. Vocal detection is built in and always runs.")
+                Text("Downloaded once and kept in BitChord's storage. Removing a model takes effect immediately: Automix falls back to tempo analysis without the beat model, and stops watching for vocal clashes without the vocal one.")
             }
             Section {
                 if store.totalBytesOnDisk > 0 {
@@ -644,7 +680,7 @@ struct AutomixModelsPage: View {
                 LabeledContent("Source", value: "GitHub releases")
                 LabeledContent("Licence", value: "MIT (beat + vocals)")
             } footer: {
-                Text("Beat This! (beat and downbeat detection, MIT) is downloaded and verified against a pinned checksum. open-unmix UMX-L (vocal detection, MIT) ships inside the app.")
+                Text("Beat This! (beat and downbeat detection) and open-unmix umxhq (vocal detection). Both are downloaded once and verified against a pinned checksum.")
             }
         }
         .formStyle(.grouped)

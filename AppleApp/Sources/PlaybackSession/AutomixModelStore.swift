@@ -2,15 +2,14 @@ import Foundation
 import CryptoKit
 import Observation
 
-/// The beat graph Automix fetches, and the vocals graph the app ships.
+/// The two ONNX graphs Automix downloads.
 ///
-/// The beat model is a *download*: 23.5 MB of graph in every app bundle is
-/// 23.5 MB that every listener pays for, and Automix works without it on the
-/// tempo fallback. The vocals model is different: the exported open-unmix
-/// `umxhq` graph is 23.2 MB, MIT, and so much of the transition decision (vocal
-/// clash, ducking, a vocal-free outro) reads it that it ships inside the app.
-/// It used to be a 113 MB download; this store removes that file on the first
-/// launch after the update.
+/// Both are *downloads*: 46.7 MB of graph in every app bundle is 46.7 MB that
+/// every listener pays for, and Automix works without them on the tempo and DSP
+/// fallbacks. The beat graph is what unlocks real beat/downbeat grids; the
+/// vocals graph is optional and only decides how much singing is in a moment.
+/// The old 113 MB vocals download used a different graph and file name; this
+/// store removes it on the first launch after the update.
 ///
 /// Every download is pinned to a revision and verified against a SHA-256 that
 /// was read off the repository before it was written down here. A redirect to a
@@ -32,6 +31,7 @@ final class AutomixModelStore {
 
     enum ModelID: String, CaseIterable, Identifiable {
         case beat
+        case vocals
 
         var id: String { rawValue }
     }
@@ -63,6 +63,22 @@ final class AutomixModelStore {
             sha256: "9f10e5efa37d3e120da2121141825fe54b23b487b32dd25a54f89039fd8f85cb",
             // The owner's release asset; the tag is the pin, not a branch.
             url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-v1/beat_this_full_int8.onnx")!
+        )
+
+        // open-unmix umxhq (SigSep/Inria, MIT). The official vocals checkpoint
+        // (vocals-b62c91ce.pth, Zenodo record 3370489) exported to standard ONNX
+        // LSTM ops, opset 17, then dynamic int8 on MatMul/Gemm only. The BiLSTMs
+        // stay float; 23.2 MB. Contract: [1, 2, 2049, 960] magnitude spectrogram
+        // -> vocals magnitude in the same shape.
+        static let vocals = ModelSpec(
+            id: .vocals,
+            fileName: "vocals_umxhq_int8.onnx",
+            displayName: "Vocal + clash detection",
+            detail: "open-unmix reads how much singing is in each moment, so Automix can keep two vocals from overlapping.",
+            byteCount: 23_209_009,
+            sha256: "7eba6bebce0cc2e2d3b5c0e490a8074e66ce27f64170c6802b245740dcaf21ef",
+            // The owner's release asset; the tag is the pin, not a branch.
+            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-umxhq-vocals-v1/vocals_umxhq_int8.onnx")!
         )
     }
 
@@ -123,7 +139,7 @@ final class AutomixModelStore {
     init(directory: URL? = nil, specs: [ModelSpec]? = nil) {
         self.directory = directory ?? Self.defaultDirectory
         self.specs = Dictionary(
-            (specs ?? [ModelSpec.beat]).map { ($0.id, $0) },
+            (specs ?? [ModelSpec.beat, ModelSpec.vocals]).map { ($0.id, $0) },
             uniquingKeysWith: { _, last in last }
         )
         for id in ModelID.allCases {
@@ -162,13 +178,20 @@ final class AutomixModelStore {
 
     // MARK: - Queries
 
-    func spec(_ id: ModelID) -> ModelSpec { specs[id] ?? .beat }
+    func spec(_ id: ModelID) -> ModelSpec {
+        if let injected = specs[id] { return injected }
+        switch id {
+        case .beat: return .beat
+        case .vocals: return .vocals
+        }
+    }
 
     func status(of id: ModelID) -> Status { status[id] ?? .notInstalled }
 
-    /// The pinned graph is installed. The launch offer uses this meaning: a fallback
-    /// is usable but still an update waiting to happen, so it keeps offering.
-    var beatInstalled: Bool { status(of: .beat).isInstalled }
+    /// Both pinned graphs are installed. The launch offer uses this meaning: a
+    /// fallback is usable but still an update waiting to happen, so it keeps
+    /// offering.
+    var allInstalled: Bool { ModelID.allCases.allSatisfy { status(of: $0).isInstalled } }
 
     /// A graph the analyser can load — the pinned one, or the previous manifest's.
     var beatAvailable: Bool { status(of: .beat).isInstalled || isUsingPreviousGraph(.beat) }
@@ -196,44 +219,25 @@ final class AutomixModelStore {
 
     /// Where the analyzer should load from.
     ///
-    /// The beat entry is the downloaded copy, then the previous manifest's copy,
-    /// then the bundle (`scripts/fetch-automix-models.sh` drops a graph into
-    /// `Resources/Models` for the development/CI flow). The vocal entry is always
-    /// the graph shipped in the app bundle: open-unmix umxhq, MIT, exported to the
-    /// same `[1, 2, 2049, 960]` contract the Rust front end speaks. An empty
-    /// string is what `configureAnalyzer` already means by "unload" — a dev build
-    /// without the resource gets the DSP vocal heuristic only.
+    /// Each entry is the downloaded copy, then the previous manifest's copy, then
+    /// nothing. An empty string is what `configureAnalyzer` already means by
+    /// "unload" — so a listener with no beat graph gets the tempo fallback, and
+    /// one with no vocals graph gets the DSP vocal heuristic. The vocals graph is
+    /// optional: the beat graph alone still plans transitions.
     ///
-    /// A **previous** beat graph wins over the bundle too: when the manifest moves
-    /// to a new model, the old file is kept as `.prev` and stays in use until the
-    /// new download hashes correctly. Losing a working beat model for the length
-    /// of a download is worse than any transition it plans.
+    /// A **previous** graph wins over the pinned name: when the manifest moves to
+    /// a new model, the old file is kept as `.prev` and stays in use until the
+    /// new download hashes correctly. Losing a working graph for the length of a
+    /// download is worse than any transition it plans.
     var analyzerPaths: (beat: String, vocal: String) {
-        (analyzerPath(for: .beat), Self.bundledVocalsPath)
+        (analyzerPath(for: .beat), analyzerPath(for: .vocals))
     }
 
     private func analyzerPath(for id: ModelID) -> String {
         if let downloaded = installedPath(id) { return downloaded }
         let previous = directory.appendingPathComponent(previousName(for: spec(id)), isDirectory: false)
         if FileManager.default.fileExists(atPath: previous.path) { return previous.path }
-        guard let bundled = Self.bundleURL(for: spec(id).fileName) else { return "" }
-        return bundled.path
-    }
-
-    private static func bundleURL(for fileName: String) -> URL? {
-        let base = (fileName as NSString).deletingPathExtension
-        let ext = (fileName as NSString).pathExtension
-        return Bundle.main.url(forResource: base, withExtension: ext, subdirectory: "Models")
-            ?? Bundle.main.url(forResource: base, withExtension: ext)
-    }
-
-    /// The vocals graph ships inside the app bundle rather than being downloaded.
-    /// It is `AppleApp/Resources/Models/vocals_umxhq_int8.onnx`, exported from the
-    /// official open-unmix umxhq vocals weights (MIT); see `THIRD_PARTY_NOTICES.md`.
-    static let bundledVocalsName = "vocals_umxhq_int8"
-
-    static var bundledVocalsPath: String {
-        bundleURL(for: bundledVocalsName + ".onnx")?.path ?? ""
+        return ""
     }
 
     // MARK: - Refresh
@@ -249,9 +253,10 @@ final class AutomixModelStore {
     func refresh() {
         ensureDirectory()
         records = loadRecords()
-        // The bundled vocals graph replaced the 113 MB download. Removing the old
-        // file is the migration; it runs before the beat reconcile so a launch
-        // after the update frees the space even when the beat model is missing.
+        // The old 113 MB vocals download used a different graph and file name.
+        // Removing its file, resume and fallback is the migration; it runs before
+        // the reconcile so a launch after the update frees the space even when a
+        // current graph is missing.
         var changed = removeLegacyVocals()
 
         for id in ModelID.allCases where !status(of: id).isBusy {
@@ -530,9 +535,10 @@ final class AutomixModelStore {
         spec.fileName + ".prev"
     }
 
-    /// The vocals graph this store used to download (113 MB). It is bundled now;
-    /// the download, its resume file and its fallback are removed once, freeing
-    /// the space. The record was keyed by the old file name, so it goes too.
+    /// The vocals graph this store used to download (113 MB, UMX-L). It is gone:
+    /// the current graph is `vocals_umxhq_int8.onnx`, so this suffix loop cannot
+    /// touch it. The old download, its resume file, its fallback and its record
+    /// are removed once, freeing the space.
     static let legacyVocalsFileName = "vocals_umxhq.onnx"
 
     @discardableResult

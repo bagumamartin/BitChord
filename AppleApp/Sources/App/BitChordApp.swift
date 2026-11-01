@@ -341,11 +341,11 @@ struct BitChordApp: App {
 
 /// Hand the analyzer whatever Automix graphs this device has.
 ///
-/// The paths are resolved on the main actor — the store's state and the bundle
-/// live there — and the load itself runs detached. `configureAnalyzer` accepts
-/// empty paths and treats them as "unload", which is what a model that was removed,
-/// or never downloaded, must mean: Automix falls back to the tempo planner and
-/// stops avoiding vocal clashes rather than refusing to transition at all.
+/// The paths are resolved on the main actor — the store's state lives there — and
+/// the load itself runs detached. `configureAnalyzer` accepts empty paths and
+/// treats them as "unload", which is what a model that was removed, or never
+/// downloaded, must mean: Automix falls back to the tempo planner and stops
+/// avoiding vocal clashes rather than refusing to transition at all.
 ///
 /// Called at playback startup, preference changes, and model install/removal.
 /// Disabling Automix unloads both graphs; Efficient mode unloads vocals.
@@ -446,18 +446,21 @@ final class AppModel {
 
     /// Offer the models, when there is something to offer and nobody has said no.
     ///
-    /// The beat model is the line: with it installed the offer has nothing to add,
-    /// and without it Automix is running on the tempo fallback whether or not the
-    /// listener knows.
+    /// The offer covers both graphs: an existing install that predates the vocals
+    /// download has the beat graph but not the vocal one, and the app must ask once
+    /// rather than silently dropping to the DSP mask. Vocals stay optional; the
+    /// sheet's "Not Now" is the answer, and it is remembered. The key is new with
+    /// the vocals download: a "not now" given to the beat-only offer said nothing
+    /// about a model the app used to ship.
     @MainActor
     func offerAutomixModelsIfNeeded() {
-        guard !AutomixModelStore.shared.beatInstalled else { return }
+        guard !AutomixModelStore.shared.allInstalled else { return }
         guard !automixModelsPresented else { return }
         guard !automixModelsAskedThisLaunch else { return }
         // The session flag is spent only when the offer is actually shown. A launch
         // that honours a previous "not now" has not asked the listener anything, so
         // switching Automix on later in that session is still free to.
-        guard !PlatformSettings.shared.getBoolean(key: "automix_models_prompt_dismissed", default: false) else { return }
+        guard !PlatformSettings.shared.getBoolean(key: "automix_models_prompt_dismissed_v2", default: false) else { return }
         automixModelsAskedThisLaunch = true
         automixModelsPresented = true
     }
@@ -470,7 +473,7 @@ final class AppModel {
     /// on and being told nothing.
     @MainActor
     func mayAskForAutomixModels() -> Bool {
-        guard !AutomixModelStore.shared.beatInstalled else { return false }
+        guard !AutomixModelStore.shared.allInstalled else { return false }
         guard !automixModelsAskedThisLaunch else { return false }
         automixModelsAskedThisLaunch = true
         return true
@@ -478,7 +481,7 @@ final class AppModel {
 
     /// Remember a "not now", so the launch offer does not return on its own.
     func declineAutomixModels() {
-        PlatformSettings.shared.putBoolean(key: "automix_models_prompt_dismissed", value: true)
+        PlatformSettings.shared.putBoolean(key: "automix_models_prompt_dismissed_v2", value: true)
     }
 
     /// Canonical tabs (UI spec §2). macOS Library sub-destinations live as

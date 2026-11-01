@@ -83,7 +83,7 @@ The app does not ship with a hosted Listen Together service. Enter a compatible 
 
 ### Optional Automix models
 
-Automix works without downloaded models, using its built-in analysis fallback. The app can offer the beat-analysis model and the larger vocal-analysis model separately. The developer helper `scripts/fetch-automix-models.sh` downloads and verifies both models into `AppleApp/Resources/Models/` for local builds.
+Automix works without downloaded models, using its built-in tempo and DSP fallbacks. The app offers the beat-and-downbeat model that times transitions and an optional vocal-clash model; both are downloaded from the project's GitHub releases and verified against a pinned size and SHA-256. No model graph is bundled with the app. The developer helper `scripts/fetch-automix-models.sh` downloads and verifies both into `native-core/fixtures/models/`, the cache the native tests and corpus scorecard read.
 
 ## Disclaimer & Legal Notice
 

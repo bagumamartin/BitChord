@@ -45,9 +45,10 @@ pub(super) fn run_options() -> rten::RunOptions {
     rten::RunOptions::default().with_thread_pool(Some(pool.clone()))
 }
 
-/// Load ONNX graphs from paths the Swift side resolved out of the app bundle.
-/// Empty paths unload that model. Returns whether the beat tracker is ready
-/// (vocals are optional — Automix still beat-matches without a mask).
+/// Load ONNX graphs from paths the Swift model store resolved (downloaded from
+/// the project's GitHub releases). Empty paths unload that model. Returns
+/// whether the beat tracker is ready (vocals are optional — Automix still
+/// beat-matches without a mask).
 pub fn configure(beat_path: &str, vocal_path: &str) -> bool {
     // Configuration is serialized, including identity publication. Unchanged
     // graphs stay loaded when only the other model/tier changed.
@@ -179,13 +180,13 @@ mod tests {
     }
 
     #[test]
-    fn load_bundled_beat_model() {
+    fn load_beat_model_from_dev_cache() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../AppleApp/Resources/Models/beat_this.onnx"
+            "/fixtures/models/beat_this.onnx"
         );
         if !std::path::Path::new(path).is_file() {
-            eprintln!("skip: {path} not present");
+            eprintln!("skip: {path} not present (run scripts/fetch-automix-models.sh)");
             return;
         }
         let model = Model::load_file(path).expect("beat model should load");
@@ -224,13 +225,13 @@ mod tests {
     }
 
     #[test]
-    fn load_bundled_vocal_model() {
+    fn load_vocal_model_from_dev_cache() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../AppleApp/Resources/Models/vocals_umxhq.onnx"
+            "/fixtures/models/vocals_umxhq_int8.onnx"
         );
         if !std::path::Path::new(path).is_file() {
-            eprintln!("skip: {path} not present");
+            eprintln!("skip: {path} not present (run scripts/fetch-automix-models.sh)");
             return;
         }
         match Model::load_file(path) {

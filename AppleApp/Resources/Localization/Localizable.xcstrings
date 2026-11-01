@@ -101,6 +101,7 @@
     "+%lld": {},
     "1": {},
     "123.5 MB total · Runs 100% on-device · Private": {},
+    "46.7 MB of models · Runs 100% on-device · Private": {},
     "A BitChord update is available": {},
     "A library you host yourself, played from the server rather than from a catalogue. It takes no part in the ranking above — it holds your own files, so it is not standing in for anything.": {},
     "A party server is a deployment somebody has to run. This app does not ship one.": {},
@@ -1124,6 +1125,8 @@
       }
     },
     "Beat This! (beat and downbeat detection) and open-unmix UMX-L (vocal detection). Both are verified against a pinned checksum after download.": {},
+    "Beat This! (beat and downbeat detection) and open-unmix umxhq (vocal detection). Both are downloaded once and verified against a pinned checksum.": {},
+    "Beat model installed; vocal detection can be added for vocal-clash avoidance": {},
     "BitChord %@": {},
     "BitChord %@ is available. Update using the same method you used to install BitChord. The release page has the change notes.": {},
     "BitChord %@ is out": {},
@@ -2351,6 +2354,7 @@
       }
     },
     "Delete %@": {},
+    "Finds the singing at the start and end of each track so two vocals do not overlap during a transition.": {},
     "Developer": {},
     "Diagnostic Reports": {},
     "Discard": {},
@@ -2681,6 +2685,7 @@
     },
     "Download %@": {},
     "Download Models (~123 MB)": {},
+    "Download Models (~46.7 MB)": {},
     "Download and install updates automatically": {},
     "Download anyway": {},
     "Downloaded collections": {},
@@ -6647,6 +6652,7 @@
     "Normalization": {},
     "Not Matched · %lld": {},
     "Not Now": {},
+    "Not installed — Automix falls back to tempo analysis": {},
     "Not now": {
       "localizations": {
         "de": {
@@ -13587,6 +13593,9 @@
     "Version": {},
     "View": {},
     "View Release Notes": {},
+    "Vocal + clash detection": {},
+    "Vocal Detection": {},
+    "Vocal model installed — without the beat model Automix falls back to tempo analysis": {},
     "Volume": {},
     "Volume Down": {},
     "Volume Up": {},
@@ -14535,6 +14544,8 @@
     "https://cloud.example.com/dav": {},
     "https://your-server.com": {},
     "https://…": {},
+    "open-unmix reads how much singing is in each moment, so Automix can keep two vocals from overlapping.": {},
+    "open-unmix umxhq": {},
     "sp_dc cookie": {},
     "{song_name}, {artist_name} and {album_name} are replaced with the track. The first button opens the song on YouTube Music, the second this project.": {},
     "“%@” is in two places": {},

@@ -66,10 +66,6 @@ targets:
       # UniFFI-generated NativeCore.swift lands here via scripts/build-native-core.sh.
       - path: Generated
         optional: true
-      - path: Resources/Models
-        optional: true
-        type: folder
-        buildPhase: resources
       - path: Resources/Localization
         buildPhase: resources
       - path: Resources/AudioLicenses

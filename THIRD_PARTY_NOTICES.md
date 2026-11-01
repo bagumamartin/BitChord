@@ -30,9 +30,9 @@ Ktor, Kotlin, kotlinx, QuickJS-KT, and other transitive dependencies have their 
 
 ## Models and network-provided resources
 
-- **Beat This! beat/downbeat model:** downloaded on demand from the release asset `model-beat-this-final0-v1`; dynamic int8 quantization of CPJKU's `final0` checkpoint, MIT. The model is optional and is not bundled. Provenance and digest are recorded in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
-- **open-unmix vocal model:** bundled as `AppleApp/Resources/Models/vocals_umxhq_int8.onnx`; derived from the MIT-licensed official SigSep `umxhq` vocals checkpoint by Stöter and Liutkus (Zenodo record 3370489, original file `vocals-b62c91ce.pth`). Export and digest details are documented in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`. The MIT license text is [`AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt`](AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt).
-- The app bundles software and analysis models, not third-party music or song audio.
+- **Beat This! beat/downbeat model:** downloaded on demand from the project's GitHub release asset `model-beat-this-final0-v1`; dynamic int8 quantization of CPJKU's `final0` checkpoint, MIT. The model is optional and is not bundled. Provenance and digest are recorded in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
+- **open-unmix vocal model:** downloaded on demand from the project's GitHub release asset `model-umxhq-vocals-v1` (`vocals_umxhq_int8.onnx`, 23,209,009 B, sha256 `7eba6beb…f21ef`); derived from the MIT-licensed official SigSep `umxhq` vocals checkpoint by Stöter and Liutkus (Zenodo record 3370489, original file `vocals-b62c91ce.pth`). The model is optional and is not bundled. Export and digest details are documented in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`. The MIT license text is [`AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt`](AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt).
+- The app bundles software but no analysis models: both Automix graphs are downloaded at runtime. It does not bundle third-party music or song audio.
 
 ## Icons, artwork, and translations
 
