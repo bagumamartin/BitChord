@@ -74,7 +74,7 @@ extension NowPlayingView {
     var playerActionRow: some View {
         VStack(spacing: 10) {
             GeometryReader { geometry in
-                let edgeInset = max(0, (geometry.size.width - (44 * 2 + 158)) / 4)
+                let edgeInset = actionRowEdgeInset(width: geometry.size.width)
                 HStack {
                     actionGlyph(.bchLyrics, selected: pane == .lyrics, label: "Lyrics") {
                         Haptics.play(.expand)
@@ -106,6 +106,18 @@ extension NowPlayingView {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Where the action row's two 44pt glyph buttons start in from either edge.
+    func actionRowEdgeInset(width: CGFloat) -> CGFloat {
+        max(0, (width - (44 * 2 + 158)) / 4)
+    }
+
+    /// Where the Lyrics and Up Next glyphs' ink starts in from either edge:
+    /// the button inset, the 26pt image's place in its 44pt button, and the
+    /// 2 of 24 units each drawing leaves clear at its outer side.
+    func actionGlyphInkInset(width: CGFloat) -> CGFloat {
+        actionRowEdgeInset(width: width) + (44 - 26) / 2 + 26 * 2 / 24
     }
 
     func actionGlyph(

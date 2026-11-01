@@ -50,12 +50,16 @@ extension NowPlayingView {
     /// of `ThinSlider`, bound to the controller's volume with the system
     /// speaker icons either side. The hardware buttons route through the same
     /// system volume this writes, so the two never disagree.
-    var deckVolumeRow: some View {
+    var deckVolumeRow: some View { volumeRow(hugsGlyphs: false) }
+
+    /// `hugsGlyphs` pins the speakers to the row's outer edges, so its ends are
+    /// the speakers' own rather than their 16pt frames'.
+    func volumeRow(hugsGlyphs: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: controller.volume == 0 ? "speaker.slash.fill" : "speaker.fill")
                 .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 16, height: 16)
+                .frame(width: 16, height: 16, alignment: hugsGlyphs ? .leading : .center)
                 .playerGlyph()
             GeometryReader { geo in
                 let w = max(geo.size.width, 1)
@@ -89,7 +93,7 @@ extension NowPlayingView {
             Image(systemName: "speaker.wave.3.fill")
                 .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 16, height: 16)
+                .frame(width: 16, height: 16, alignment: hugsGlyphs ? .trailing : .center)
                 .playerGlyph()
         }
         .accessibilityElement()

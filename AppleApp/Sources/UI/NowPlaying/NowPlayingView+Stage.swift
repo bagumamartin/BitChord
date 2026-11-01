@@ -252,6 +252,24 @@ extension NowPlayingView {
     /// lyrics does not shove the transport down. The pane toggles live here
     /// rather than floating over the artwork: they are *which pane* is showing,
     /// which is the same question the rest of this block answers.
+    /// The volume row runs edge to edge with the action row's two glyphs on
+    /// an upright iPad whose window fills the screen, while neither pane is
+    /// open.
+    private var volumeSpansActionGlyphs: Bool {
+        #if os(iOS)
+        guard isIPad, pane == .main,
+              let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive })
+        else { return false }
+        let screen = scene.screen.bounds.size
+        let window = scene.coordinateSpace.bounds.size
+        return screen.width < screen.height && window == screen
+        #else
+        false
+        #endif
+    }
+
     var deck: some View {
         VStack(spacing: 14) {
             // Credits, status and strip live on the main player only. Upstream's
@@ -283,8 +301,18 @@ extension NowPlayingView {
             // speaker icons in the hairline style of `ThinSlider`. Gone when
             // `hide_volume_bar` is on, the same as upstream.
             if !controller.hideVolumeBar {
-                deckVolumeRow
-                    .padding(.horizontal, 32)
+                if volumeSpansActionGlyphs {
+                    // Ends at the Lyrics glyph's left edge and Up Next's
+                    // right, measured on the same width as the action row.
+                    GeometryReader { geometry in
+                        volumeRow(hugsGlyphs: true)
+                            .padding(.horizontal, actionGlyphInkInset(width: geometry.size.width))
+                    }
+                    .frame(height: 16)
+                } else {
+                    deckVolumeRow
+                        .padding(.horizontal, 32)
+                }
             }
             playerActionRow
         }
