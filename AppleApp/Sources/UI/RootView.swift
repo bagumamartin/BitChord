@@ -860,6 +860,10 @@ private final class MacWindowToolbarView: NSView {
 struct PlaybackPillMount: ViewModifier {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The keyboard covers the tab bar, and the accessory with it, so while it
+    /// is up the iPhone's pill rides on top of it instead (the iPad's per-tab
+    /// inset does that on its own).
+    @State private var keyboardUp = false
     #endif
 
     func body(content: Content) -> some View {
@@ -874,10 +878,27 @@ struct PlaybackPillMount: ViewModifier {
             // the sidebar and keeps Music's 620 pt width.
             content
         } else if #available(iOS 26.0, *) {
-            // iPhone from 26: Music's own bottom accessory, full width.
-            content.tabViewBottomAccessory {
-                PlaybackPill()
-            }
+            // iPhone from 26: Music's own bottom accessory, full width. A scroll
+            // down minimizes the tab bar and the pill drops into it, between
+            // the selected tab and Search.
+            accessory(content.tabBarMinimizeBehavior(.onScrollDown))
+                .overlay(alignment: .bottom) {
+                    if keyboardUp {
+                        PlaybackPill()
+                            // The accessory's glass is the tab bar's; out here
+                            // the pill would otherwise have none.
+                            .chromeGlass(in: Capsule())
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 8)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                    withAnimation(.smooth(duration: 0.25)) { keyboardUp = true }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                    withAnimation(.smooth(duration: 0.25)) { keyboardUp = false }
+                }
         } else {
             fallbackMount(content)
         }
@@ -889,6 +910,23 @@ struct PlaybackPillMount: ViewModifier {
     }
 
     #if os(iOS)
+    /// The bottom accessory, stood down from 26.1 while the pill rides the
+    /// keyboard, so there is only ever one pill (and one zoom source for Now
+    /// Playing). On 26.0 the covered one stays mounted.
+    @available(iOS 26.0, *)
+    @ViewBuilder
+    private func accessory(_ content: some View) -> some View {
+        if #available(iOS 26.1, *) {
+            content.tabViewBottomAccessory(isEnabled: !keyboardUp) {
+                PlaybackAccessory()
+            }
+        } else {
+            content.tabViewBottomAccessory {
+                PlaybackAccessory()
+            }
+        }
+    }
+
     private func fallbackMount(_ content: Content) -> some View {
         content.safeAreaInset(edge: .bottom) {
             PlaybackPill()
@@ -904,6 +942,17 @@ struct PlaybackPillMount: ViewModifier {
 }
 
 #if os(iOS)
+/// The pill in the iPhone's bottom accessory, told whether the minimized tab
+/// bar has it inline.
+@available(iOS 26.0, *)
+private struct PlaybackAccessory: View {
+    @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+
+    var body: some View {
+        PlaybackPill(inline: placement == .inline)
+    }
+}
+
 /// iPad per-tab pill mount. Lives inside the detail column so sidebar
 /// collapse/expand reflows it and it stays centered on the main view. Content-sized at 620pt like Music's
 /// compact pill instead of the full-width stretch of the tab-level

@@ -13,6 +13,10 @@ import UIKit
 /// party on the left, the now-playing slot in the middle, the lyrics and queue
 /// panels, track actions, volume and AirPlay on the right.
 struct PlaybackPill: View {
+    /// Squeezed between the tab button and Search after the iPhone's tab bar
+    /// minimizes on scroll (iOS 26's inline bottom accessory, as in Music).
+    var inline = false
+
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -65,7 +69,7 @@ struct PlaybackPill: View {
             Button {
                 appModel.nowPlayingPresented = true
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: inline ? 8 : 10) {
                     artworkOrPlaceholder
                     info
                     Spacer(minLength: 4)
@@ -82,8 +86,8 @@ struct PlaybackPill: View {
                 buttons
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, inline ? 8 : 12)
+        .padding(.vertical, inline ? 4 : 8)
         .modifier(MiniPlayerChrome(fill: chromeFill, reduceTransparency: reduceTransparency || reduceBlur))
         .overlay(alignment: .bottom) { progressHairline.clipShape(Capsule()) }
         .contentShape(.rect)
@@ -312,11 +316,12 @@ struct PlaybackPill: View {
 
     @ViewBuilder
     private var artworkOrPlaceholder: some View {
+        let side: CGFloat = inline ? 30 : 40
         if controller.current != nil {
             VideoSurface(cornerRadius: 8) {
-                ArtworkView(entry: controller.current, side: 40)
+                ArtworkView(entry: controller.current, side: side)
             }
-            .frame(width: 40, height: 40)
+            .frame(width: side, height: side)
             .clipShape(.rect(cornerRadius: 8, style: .continuous))
             .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -326,7 +331,7 @@ struct PlaybackPill: View {
         } else {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quaternary.opacity(0.6))
-                .frame(width: 40, height: 40)
+                .frame(width: side, height: side)
                 .overlay {
                         Image(.bchMusicNote)
                             .resizable()
@@ -343,10 +348,13 @@ struct PlaybackPill: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(controller.current == nil ? .secondary : .primary)
                 .lineLimit(1)
-            Text(controller.current?.artist ?? "Music you start appears here")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            // Inline there is room for the title alone, as in Music.
+            if !inline {
+                Text(controller.current?.artist ?? "Music you start appears here")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -601,7 +609,7 @@ struct PlaybackPill: View {
     }
 
     private var buttons: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: inline ? 2 : 8) {
             Button {
                 Haptics.play(controller.isPlaying ? .pause : .resume)
                 controller.togglePlayPause()
@@ -614,7 +622,7 @@ struct PlaybackPill: View {
                 }
             }
             .buttonStyle(.plain)
-            .frame(width: 40, height: 40)
+            .frame(width: inline ? 34 : 40, height: inline ? 34 : 40)
             .disabled(controller.current == nil && !controller.isBuffering)
             .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
 
@@ -626,14 +634,16 @@ struct PlaybackPill: View {
                     .scaledFont(size: 19, weight: .semibold)
             }
             .buttonStyle(.plain)
-            .frame(width: 40, height: 40)
+            .frame(width: inline ? 34 : 40, height: inline ? 34 : 40)
             .foregroundStyle(
                 PartyStore.shared.state.controlsLocked ? Color.primary.opacity(0.3) : Color.primary
             )
             .disabled(!controller.canPlayNext || PartyStore.shared.state.controlsLocked)
             .accessibilityLabel("Next")
 
-            partyButton.frame(width: 40, height: 40)
+            if !inline {
+                partyButton.frame(width: 40, height: 40)
+            }
         }
         .foregroundStyle(.primary)
     }
