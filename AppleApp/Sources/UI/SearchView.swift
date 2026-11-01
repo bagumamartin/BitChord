@@ -120,7 +120,7 @@ enum AddonSearchHistory {
     }
 }
 
-/// The titlebar's YouTube / Addons switcher, on the Mac and a regular-width
+/// The titlebar's YouTube / Library / Addons switcher, on the Mac and a regular-width
 /// iPad.
 ///
 /// The system's own segmented control rather than a hand-drawn capsule: in a
@@ -141,7 +141,7 @@ struct ToolbarSearchSourceSwitcher: View {
         .labelsHidden()
         .fixedSize()
         #if os(macOS)
-        .help("Search YouTube Music or your addons")
+        .help("Search YouTube Music, your library or your addons")
         #endif
     }
 }
@@ -192,43 +192,73 @@ private struct MacToolbarSearchField: View {
     }
 }
 #else
-/// The iPad top bar's search field, placed as a first-class `ToolbarItem`
-/// ahead of the YouTube/Addons switcher so the two controls stay in a
-/// deterministic order inside the navigation bar.
-private struct IPadToolbarSearchField: View {
+/// The iPad top bar's search control, placed as a first-class `ToolbarItem`
+/// just ahead of the YouTube / Library / Addons switcher.
+///
+/// Collapsed it is a round search button: a full pill does not fit at a
+/// readable width between the switcher and the floating tab bar. Tapped, the
+/// tab bar steps aside first (the App Store's search does the same) and the
+/// button then grows leftwards into the pill; closing runs the other way.
+///
+/// The item draws its own glass. The toolbar's platter snaps to an item's new
+/// size instead of animating it, so the slot is widened to the pill's width
+/// first (`roomy`, invisible: the glass is still the button's circle, pinned
+/// trailing) and only then is the glass itself animated open.
+private struct IPadToolbarSearchPill: View {
+    static let openWidth: CGFloat = 300
+    static let side: CGFloat = 36
+
     @Binding var text: String
+    let roomy: Bool
+    let open: Bool
     var focused: FocusState<Bool>.Binding
+    var onExpand: () -> Void
     var onSubmit: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField("Artists, Songs, Lyrics, and More", text: $text)
-                .textFieldStyle(.plain)
-                .font(.subheadline)
-                .focused(focused)
-                .submitLabel(.search)
-                .onSubmit(onSubmit)
-            if !text.isEmpty {
-                Button {
-                    text = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                .foregroundStyle(open ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                // Collapsed, the glass is the button; open, the field speaks
+                // for itself.
+                .accessibilityLabel("Search")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHidden(open)
+            if open {
+                TextField("Artists, Songs, Lyrics, and More", text: $text)
+                    .textFieldStyle(.plain)
+                    .font(.subheadline)
+                    .focused(focused)
+                    .submitLabel(.search)
+                    .onSubmit(onSubmit)
+                    .transition(.opacity)
+                if !text.isEmpty {
+                    Button {
+                        text = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                    .transition(.opacity)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 12)
-        .frame(width: 300, height: 36)
-        .contentShape(.rect)
+        .padding(.horizontal, open ? 12 : 0)
+        .frame(width: open ? Self.openWidth : Self.side, height: Self.side)
+        .chromeGlass(in: Capsule())
+        .contentShape(Capsule())
         .onTapGesture {
-            focused.wrappedValue = true
+            if open {
+                focused.wrappedValue = true
+            } else {
+                onExpand()
+            }
         }
+        .frame(width: roomy ? Self.openWidth : Self.side, alignment: .trailing)
     }
 }
 
@@ -263,6 +293,7 @@ struct SearchView: View {
     private static let typeaheadMaxResults = 15
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
+    @Environment(AuthController.self) private var auth
     #if os(macOS)
     /// Settings is a scene on the Mac, not an in-app cover.
     @Environment(\.openSettings) private var openSettings
@@ -322,6 +353,18 @@ struct SearchView: View {
     /// How many addons are enabled, so the Addons tab can say "no addons yet"
     /// before a query has to fail to prove it.
     @State private var addonCount = 0
+    /// The Library source's catalogue: the signed-in library's songs and its
+    /// albums / artists / playlists shelves, loaded once the source is picked.
+    /// The device's scanned songs come straight from `LocalLibrary`.
+    @State private var librarySongs: [YouTubeSong] = []
+    @State private var libraryShelves: [FeedShelf] = []
+    @State private var libraryLoading = false
+    @State private var libraryError: String?
+    @State private var local = LocalLibrary.shared
+    /// The iPad pill's two steps; see `setIPadSearchExpanded`.
+    @State private var pillRoomy = false
+    @State private var pillOpen = false
+    @State private var pillGeneration = 0
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -344,12 +387,20 @@ struct SearchView: View {
         _searchSource = State(initialValue: initialSource)
     }
 
-    /// Which catalogue the field answers. Upstream's three-way switcher also has
-    /// Local Music; our Local Music lives in Library, so this one is two.
+    /// Which catalogue the field answers: YouTube Music, the listener's own
+    /// library, or their addons, as upstream's three-way switcher does.
+    /// Upstream's Library is the Local Music folder alone; ours also holds the
+    /// signed-in library, so this one searches both.
     enum SearchSource: String, CaseIterable, Identifiable, Codable {
-        case youtube, addons
+        case youtube, library, addons
         var id: String { rawValue }
-        var label: String { self == .youtube ? "YouTube" : "Addons" }
+        var label: String {
+            switch self {
+            case .youtube: return "YouTube"
+            case .library: return "Library"
+            case .addons: return "Addons"
+            }
+        }
     }
 
     enum Scope: String, CaseIterable, Identifiable, Codable {
@@ -384,18 +435,16 @@ struct SearchView: View {
                         TopBarLeadingMark()
                     }
                     if horizontalSizeClass == .regular {
-                        // iPad: the top bar carries the search pill first and
-                        // then the YouTube/Addons switcher, separated into two
-                        // distinct glass pills with a fixed toolbar spacer so
-                        // iPadOS does not merge adjacent trailing items into a
-                        // single shared platter.
-                        ToolbarItem(placement: .topBarTrailing) {
-                            IPadToolbarSearchField(text: $query, focused: $searchFieldFocused) {
-                                Task {
-                                    await performSearch()
-                                    searchFieldFocused = false
-                                }
-                            }
+                        // iPad: the top bar carries the search button (the
+                        // pill, once open) and then the YouTube / Library /
+                        // Addons switcher, separated into two distinct glass
+                        // pills with a fixed toolbar spacer so iPadOS does not
+                        // merge adjacent trailing items into a single platter.
+                        if #available(iOS 26.0, *) {
+                            ToolbarItem(placement: .topBarTrailing) { iPadSearchPill }
+                                .sharedBackgroundVisibility(.hidden)
+                        } else {
+                            ToolbarItem(placement: .topBarTrailing) { iPadSearchPill }
                         }
                         if #available(iOS 26.0, *) {
                             ToolbarSpacer(.fixed, placement: .topBarTrailing)
@@ -451,8 +500,22 @@ struct SearchView: View {
                     // below an empty field.
                     if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         resetToHistory()
+                        if !searchFieldFocused { setIPadSearchExpanded(false) }
                     }
                 }
+                #if os(iOS)
+                // The iPad pill folds back into its button, and the tab bar
+                // returns, once it is left with nothing in it. While it holds a
+                // query it stays open: its results are what the page shows.
+                .onChange(of: searchFieldFocused) { _, focused in
+                    if !focused && term.isEmpty { setIPadSearchExpanded(false) }
+                }
+                .onAppear {
+                    // Back on a page that still holds results: the pill shows
+                    // what they are for, without raising the keyboard.
+                    if !term.isEmpty { setIPadSearchExpanded(true, focus: false) }
+                }
+                #endif
                 .onChange(of: isSearchPresented) { _, presented in
                     if !presented && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         resetToHistory()
@@ -469,7 +532,11 @@ struct SearchView: View {
                     appModel.pendingSearchQuery = nil
                     Task { await performSearch() }
                 }
-                .onDisappear { cancelSuggestions() }
+                .onDisappear {
+                    cancelSuggestions()
+                    // Another tab must not inherit a hidden tab bar.
+                    setIPadSearchExpanded(false, animated: false)
+                }
         }
     }
 
@@ -507,12 +574,84 @@ struct SearchView: View {
     /// update, so setting focus in the same turn asks a view that is not there
     /// yet.
     private func focusTheField() {
+        #if os(iOS)
+        if horizontalSizeClass == .regular {
+            // The pill's field only exists once it is open; opening focuses it.
+            setIPadSearchExpanded(true)
+            return
+        }
+        #endif
         Task { @MainActor in
             #if os(iOS)
             isSearchPresented = true
             #endif
             searchFieldFocused = true
         }
+    }
+
+    #if os(iOS)
+    private var iPadSearchPill: some View {
+        IPadToolbarSearchPill(
+            text: $query,
+            roomy: pillRoomy,
+            open: pillOpen,
+            focused: $searchFieldFocused,
+            onExpand: { focusTheField() },
+            onSubmit: {
+                Task {
+                    await performSearch()
+                    searchFieldFocused = false
+                }
+            }
+        )
+    }
+    #endif
+
+    /// Opens or folds the iPad's search pill, in steps so nothing is ever
+    /// short of room in the top bar. Opening: the tab bar leaves (see
+    /// `iPadPlaybackChrome`), the item's slot widens, then the glass grows
+    /// leftwards and the field takes focus. Folding runs the same steps
+    /// backwards, so the bar only returns once the pill is a button again.
+    /// Without the order the pill grew while the bar was still there, and
+    /// iPadOS pushed the source switcher into a "⋯" overflow menu meanwhile.
+    /// A no-op anywhere but a regular-width iPad.
+    private func setIPadSearchExpanded(_ expanded: Bool, animated: Bool = true, focus: Bool = true) {
+        #if os(iOS)
+        let wanted = expanded && horizontalSizeClass == .regular
+        guard wanted != appModel.iPadSearchExpanded || wanted != pillOpen else { return }
+        pillGeneration &+= 1
+        let generation = pillGeneration
+        guard animated else {
+            pillOpen = wanted
+            pillRoomy = wanted
+            appModel.iPadSearchExpanded = wanted
+            return
+        }
+        Task { @MainActor in
+            func current() -> Bool { generation == pillGeneration }
+            if wanted {
+                withAnimation(.smooth(duration: 0.3)) { appModel.iPadSearchExpanded = true }
+                try? await Task.sleep(for: .milliseconds(300))
+                guard current() else { return }
+                pillRoomy = true
+                // One frame for the bar to lay out the wider slot.
+                try? await Task.sleep(for: .milliseconds(20))
+                guard current() else { return }
+                withAnimation(.smooth(duration: 0.35)) { pillOpen = true }
+                guard focus else { return }
+                // The field is inserted by that same update; focus it on the next.
+                try? await Task.sleep(for: .milliseconds(50))
+                guard current() else { return }
+                searchFieldFocused = true
+            } else {
+                withAnimation(.smooth(duration: 0.3)) { pillOpen = false }
+                try? await Task.sleep(for: .milliseconds(300))
+                guard current() else { return }
+                pillRoomy = false
+                withAnimation(.smooth(duration: 0.3)) { appModel.iPadSearchExpanded = false }
+            }
+        }
+        #endif
     }
 
     /// Cancels an in-flight typeahead request.
@@ -583,11 +722,14 @@ struct SearchView: View {
                     .padding(.bottom, 10)
             }
             #endif
-            if searchSource == .addons {
-                addonResultsColumn
-            } else {
-                youtubeResultsColumn
+            switch searchSource {
+            case .youtube: youtubeResultsColumn
+            case .library: libraryResultsColumn
+            case .addons: addonResultsColumn
             }
+        }
+        .task(id: searchSource == .library ? auth.sessionEpoch : -1) {
+            await loadLibrary()
         }
         .onChange(of: scenePhase) { _, _ in refreshAddonCount() }
         .onChange(of: searchSource) { _, _ in
@@ -722,6 +864,184 @@ struct SearchView: View {
                 history
             }
         }
+    }
+
+    // MARK: - Library source
+
+    /// What the Library source found for the field's text, section by section.
+    private struct LibraryMatches {
+        var songs: [YouTubeSong] = []
+        var device: [LocalTrack] = []
+        var artists: [SearchHitDTO] = []
+        var albums: [SearchHitDTO] = []
+        var playlists: [SearchHitDTO] = []
+
+        var isEmpty: Bool {
+            songs.isEmpty && device.isEmpty && artists.isEmpty && albums.isEmpty && playlists.isEmpty
+        }
+    }
+
+    /// Every word typed has to appear somewhere in the row, in any order, so
+    /// "titanium sia" finds Titanium by Sia.
+    private static func libraryMatch(_ words: [String], _ fields: String?...) -> Bool {
+        let haystack = fields.compactMap { $0 }.joined(separator: " ")
+        return words.allSatisfy { haystack.localizedStandardContains($0) }
+    }
+
+    private var libraryMatches: LibraryMatches {
+        let words = term.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return LibraryMatches() }
+        func cards(_ shelf: String, type: String) -> [SearchHitDTO] {
+            (libraryShelf(titled: shelf, in: libraryShelves)?.items ?? [])
+                .filter { $0.browseId != nil && Self.libraryMatch(words, $0.title, $0.subtitle) }
+                .map {
+                    SearchHitDTO(
+                        kind: "browse", videoId: nil, title: $0.title, subtitle: $0.subtitle,
+                        thumbnailUrl: $0.thumbnailUrl, durationText: nil, albumName: nil,
+                        browseId: $0.browseId, browseType: type, artistId: nil, albumId: nil,
+                        isVideo: nil, setVideoId: nil
+                    )
+                }
+        }
+        return LibraryMatches(
+            songs: librarySongs.filter { Self.libraryMatch(words, $0.title, $0.artist, $0.albumName) },
+            device: local.tracks.filter { Self.libraryMatch(words, $0.title, $0.artist, $0.album) },
+            artists: cards("artists", type: "ARTIST"),
+            albums: cards("albums", type: "ALBUM"),
+            playlists: cards("playlists", type: "PLAYLIST")
+        )
+    }
+
+    /// Loads the signed-in library for the Library source. Both requests go
+    /// through the page cache the Library screens use, so a library already
+    /// opened there answers at once.
+    private func loadLibrary() async {
+        guard searchSource == .library else { return }
+        guard auth.signedIn else {
+            librarySongs = []
+            libraryShelves = []
+            libraryLoading = false
+            return
+        }
+        libraryLoading = librarySongs.isEmpty && libraryShelves.isEmpty
+        libraryError = nil
+        async let songs = InnertubeFeed.shared.librarySongs()
+        async let shelves = InnertubeFeed.shared.library()
+        var failure: String?
+        do { librarySongs = try await songs } catch { failure = error.localizedDescription }
+        do { libraryShelves = try await shelves } catch { failure = failure ?? error.localizedDescription }
+        guard !Task.isCancelled else { return }
+        // One half arriving is enough to search; the error is for when there
+        // is nothing to search at all.
+        libraryError = librarySongs.isEmpty && libraryShelves.isEmpty ? failure : nil
+        libraryLoading = false
+    }
+
+    /// The Library source's column. It filters as the field is typed into —
+    /// everything it searches is already on the device — so there is no
+    /// submitted term, no suggestions and no history of its own.
+    @ViewBuilder
+    private var libraryResultsColumn: some View {
+        let matches = libraryMatches
+        if !auth.signedIn && !local.scanned {
+            EmptyStateView(
+                icon: Image(.bchLibrary),
+                title: "Search your library",
+                subtitle: "Sign in, or scan a folder on this device, to search the songs, albums, artists and playlists you keep.",
+                buttonTitle: "Sign In"
+            ) { auth.loginPresented = true }
+        } else if term.isEmpty {
+            EmptyStateView(
+                icon: Image(.bchLibrary),
+                title: "Search your library",
+                subtitle: "Songs, albums, artists and playlists you saved, and the music on this device.",
+                buttonTitle: nil,
+                action: nil
+            )
+        } else if matches.isEmpty && libraryLoading {
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(0..<8, id: \.self) { _ in SkeletonBlock(height: 52) }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 12)
+            }
+        } else if matches.isEmpty, let libraryError, !local.scanned {
+            EmptyStateView(icon: Image(.bchLibrary), title: "Library unavailable", subtitle: libraryError, buttonTitle: "Retry") {
+                Task { await loadLibrary() }
+            }
+        } else if matches.isEmpty {
+            EmptyStateView(icon: Image(.bchSearch), title: "No results", subtitle: "Nothing in your library for “\(term)”.", buttonTitle: nil, action: nil)
+        } else {
+            List {
+                if !matches.songs.isEmpty {
+                    librarySection("Songs") {
+                        let entries = matches.songs.map(Self.libraryEntry)
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                            librarySongRow(entry) {
+                                controller.play(entries, at: index, context: "Library", contextID: "library:songs")
+                            }
+                        }
+                    }
+                }
+                if !matches.device.isEmpty {
+                    librarySection("On This Device") {
+                        let entries = matches.device.map(QueueEntry.from)
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                            librarySongRow(entry) {
+                                controller.play(entries, at: index, context: "On Device", contextID: "local:songs")
+                            }
+                        }
+                    }
+                }
+                if !matches.artists.isEmpty {
+                    librarySection("Artists") { ForEach(matches.artists) { searchHitRow($0) } }
+                }
+                if !matches.albums.isEmpty {
+                    librarySection("Albums") { ForEach(matches.albums) { searchHitRow($0) } }
+                }
+                if !matches.playlists.isEmpty {
+                    librarySection("Playlists") { ForEach(matches.playlists) { searchHitRow($0) } }
+                }
+            }
+            .listStyle(.plain)
+            .listSectionSeparator(.hidden)
+            .scrollContentBackground(.hidden)
+        }
+    }
+
+    private func librarySection<Rows: View>(_ title: String, @ViewBuilder rows: () -> Rows) -> some View {
+        Section {
+            rows()
+        } header: {
+            Text(title)
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.primary)
+                .textCase(nil)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+        }
+    }
+
+    private func librarySongRow(_ entry: QueueEntry, play: @escaping () -> Void) -> some View {
+        SongRow(
+            entry: entry,
+            isCurrent: controller.current?.id == entry.id,
+            play: play,
+            playNext: { controller.playNext(entry) },
+            addToQueue: { controller.addToQueue(entry) }
+        )
+        .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
+        .searchRowChrome()
+    }
+
+    private static func libraryEntry(_ song: YouTubeSong) -> QueueEntry {
+        QueueEntry(
+            id: song.videoId, title: song.title, artist: song.artist,
+            source: "yt:\(song.videoId)", thumbnailUrl: song.thumbnailUrl,
+            durationText: song.durationText, albumName: song.albumName,
+            artworkData: nil, isLocal: false
+        )
     }
 
     /// The Addons source's column: the words searched there before while the
@@ -1498,7 +1818,12 @@ struct SearchView: View {
     private func performSearch() async {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return }
-        if searchSource == .addons {
+        switch searchSource {
+        case .youtube: break
+        // The library answers as the field is typed into, from what is
+        // already loaded; there is nothing for a submit to fetch.
+        case .library: return
+        case .addons:
             await performAddonSearch(term)
             return
         }

@@ -194,7 +194,14 @@ struct RootView: View {
         .sheet(item: $updateDetails) { release in UpdateSheet(release: release) }
         #endif
         .onChange(of: tabBinding.wrappedValue) { old, new in
+            #if os(iOS)
+            // A regular-width iPad's field is a button that opens into a pill
+            // and moves the tab bar aside; arriving at the page must not do
+            // that by itself. Re-tapping the tab, ⌘F and the intents still do.
+            if new == .search, sizeClass != .regular { appModel.focusSearch = true }
+            #else
             if new == .search { appModel.focusSearch = true }
+            #endif
             _ = old
         }
         #if os(macOS)
@@ -904,12 +911,14 @@ struct PlaybackPillMount: ViewModifier {
 struct iPadPlaybackChrome: ViewModifier {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.iPadSidebar) private var sidebar
+    @Environment(AppModel.self) private var appModel
 
     func body(content: Content) -> some View {
         pill(content)
             // The sidebar and the tab bar take turns: open, the sidebar is the
-            // navigation and the bar would only repeat it.
-            .toolbar(sidebar?.isOpen == true ? .hidden : .automatic, for: .tabBar)
+            // navigation and the bar would only repeat it. The search pill
+            // takes the bar's place too, while it is open.
+            .toolbar(sidebar?.isOpen == true || appModel.iPadSearchExpanded ? .hidden : .automatic, for: .tabBar)
     }
 
     @ViewBuilder

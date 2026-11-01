@@ -418,6 +418,10 @@ final class AppModel {
     var pendingPartyInvite: String?
     var focusSearch = false
     var pendingSearchQuery: String?
+    /// Whether the iPad's search button is open as a pill. The floating tab
+    /// bar steps aside while it is, as the App Store's does, because the pill,
+    /// the source switcher and the bar do not fit across one top bar.
+    var iPadSearchExpanded = false
     /// Set by the macOS menu commands to ask the player to reveal a pane that is
     /// otherwise behind a toggle. One-shot: the player consumes it and clears it,
     /// so holding ⌘U does not keep re-toggling.
