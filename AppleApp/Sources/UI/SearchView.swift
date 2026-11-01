@@ -272,6 +272,24 @@ private struct IPadToolbarSearchPill: View {
     }
 }
 
+/// A row pinned under the top bar, over the page's own scrolling content: a
+/// bar of its own from iOS 26, so content passing under it gets the bar's edge
+/// effect rather than running into the row.
+private struct TopRow<Row: View>: ViewModifier {
+    let enabled: Bool
+    @ViewBuilder var row: Row
+
+    func body(content: Content) -> some View {
+        if !enabled {
+            content
+        } else if #available(iOS 26.0, *) {
+            content.safeAreaBar(edge: .top, spacing: 0) { row }
+        } else {
+            content.safeAreaInset(edge: .top, spacing: 0) { row.background(.bar) }
+        }
+    }
+}
+
 private struct CompactPhoneSearchDrawer: ViewModifier {
     let isCompact: Bool
     @Binding var query: String
@@ -376,7 +394,12 @@ struct SearchView: View {
     @State private var pillOpen = false
     @State private var pillGeneration = 0
     /// The iPad source switcher's height in the bar, which the pill matches.
-    @State private var switcherHeight: CGFloat = 36
+    @State private var switcherHeight: CGFloat = 47
+    /// The page's width. Narrow (an iPad in portrait), the top bar has no room
+    /// for the switcher beside the tab bar and iPadOS folds it into a "⋯" menu,
+    /// so it moves to the title's row instead, opposite the title.
+    @State private var pageWidth: CGFloat = 0
+    private var switcherInBar: Bool { pageWidth == 0 || pageWidth >= 1040 }
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -456,21 +479,13 @@ struct SearchView: View {
                         } else {
                             ToolbarItem(placement: .topBarTrailing) { iPadSearchPill }
                         }
-                        if #available(iOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .topBarTrailing)
-                            ToolbarItem(placement: .topBarTrailing) {
-                                ToolbarSearchSourceSwitcher(selection: $searchSource)
-                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                                        if height > 0 { switcherHeight = height }
-                                    }
-                            }
-                            .sharedBackgroundVisibility(.hidden)
-                        } else {
-                            ToolbarItem(placement: .topBarTrailing) {
-                                ToolbarSearchSourceSwitcher(selection: $searchSource)
-                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                                        if height > 0 { switcherHeight = height }
-                                    }
+                        if switcherInBar {
+                            if #available(iOS 26.0, *) {
+                                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                                ToolbarItem(placement: .topBarTrailing) { measuredSwitcher }
+                                    .sharedBackgroundVisibility(.hidden)
+                            } else {
+                                ToolbarItem(placement: .topBarTrailing) { measuredSwitcher }
                             }
                         }
                     } else {
@@ -481,6 +496,20 @@ struct SearchView: View {
                     #endif
                 }
                 #if os(iOS)
+                .navigationBarTitleDisplayMode(titleRow ? .inline : .automatic)
+                .modifier(TopRow(enabled: titleRow) {
+                    HStack(spacing: 16) {
+                        Text("Search")
+                            .font(.largeTitle.bold())
+                            .accessibilityAddTraits(.isHeader)
+                        Spacer(minLength: 0)
+                        measuredSwitcher
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                })
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
                 .modifier(CompactPhoneSearchDrawer(
                     isCompact: horizontalSizeClass != .regular,
                     query: $query,
@@ -606,6 +635,20 @@ struct SearchView: View {
     }
 
     #if os(iOS)
+    /// An iPad too narrow for the switcher in the top bar: the title and the
+    /// switcher share a row under it, one on each margin.
+    private var titleRow: Bool { horizontalSizeClass == .regular && !switcherInBar }
+
+    /// The source switcher, measured in the top bar so the search button
+    /// stands its height. Under the bar it is a plain segmented control, a
+    /// size smaller, and the button keeps the bar's height instead.
+    private var measuredSwitcher: some View {
+        ToolbarSearchSourceSwitcher(selection: $searchSource)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if height > 0, switcherInBar { switcherHeight = height }
+            }
+    }
+
     private var iPadSearchPill: some View {
         IPadToolbarSearchPill(
             text: $query,
