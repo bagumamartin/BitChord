@@ -28,6 +28,9 @@ struct BitChordApp: App {
     /// screen being somewhere else.
     @State private var partySync: PartySync?
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(DownloadAppDelegate.self) private var downloadDelegate
+    #endif
     #if os(macOS)
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
     @AppStorage("menu_bar_player") private var menuBarPlayer = true

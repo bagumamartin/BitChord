@@ -3,6 +3,25 @@ import BitChordShared
 
 extension PlaybackController {
     func pollStreamRecovery() {
+        if let pending = deferredNetworkRecovery {
+            guard NetworkQuality.shared.connected else { return }
+            deferredNetworkRecovery = nil
+            if current?.id == pending.entryID, playGeneration == pending.generation, state == .buffering {
+                engineLoadedId = nil
+                streamRecovery.select(pending.entryID, resetAttempts: true)
+                SourceResolverBridge.shared.refreshPlaybackSources()
+                if let entry = current, let videoID = youtubeVideoID(for: entry) { PlayerBridge.shared.forgetPlaybackUrl(videoId: videoID) }
+                loadCurrent(playingIndex, startAt: pending.position, refreshAutoplay: false, freshResolution: true)
+                return
+            }
+        }
+        // The range downloader waits for connectivity at its current offset.
+        // An outage must not consume the two source-recovery attempts.
+        guard NetworkQuality.shared.connected else { return }
+        if streamRecoveryPathChanges != NetworkQuality.shared.pathChanges {
+            streamRecoveryPathChanges = NetworkQuality.shared.pathChanges
+            if let entry = current { streamRecovery.select(entry.id, resetAttempts: false) }
+        }
         if state == .paused {
             _ = streamRecovery.observe(position: playbackPosition, now: ProcessInfo.processInfo.systemUptime, playing: false, bufferedFrames: 0)
             return // Keep source failures queued until the listener resumes.
@@ -52,6 +71,12 @@ extension PlaybackController {
               queue.indices.contains(playingIndex), queue[playingIndex].id == entry.id,
               !smartMixInProgress, dolbyRenderer == nil else { return false }
         let at = playbackPosition
+        if !NetworkQuality.shared.connected {
+            deferredNetworkRecovery = (entry.id, at, playGeneration)
+            state = .buffering
+            lastError = "Waiting for the network to return."
+            return true
+        }
         guard streamRecovery.claimRetry(position: at, duration: duration) else { return false }
         wakeGrowingReader(source)
         recoveringEntryID = entry.id

@@ -13,11 +13,10 @@ final class ObservationFlag: @unchecked Sendable {
 struct LocalTrack { var path = ""; var title = ""; var artist = ""; var durationSeconds = 0.0; var album = ""; var artwork: Data? }
 @MainActor final class NetworkQuality { static let shared = NetworkQuality(); var connected = true; var metered = false }
 @MainActor enum PageSession { static func generation() -> Int64 { AuthBridge.shared.sessionGeneration() } }
-struct TestCacheMetadata { var codec: String; var kbps: Int }
-actor StreamFileCache {
-    static let shared = StreamFileCache()
-    func metadata(at path: String) -> TestCacheMetadata? { nil }
-    func completedDownloadPath(videoId: String, requireLossless: Bool, minimumKbps: Int) -> String? { nil }
+struct BridgeDownloadBackend: DownloadBackend {
+    func resolve(_ entry: QueueEntry, quality: String) async throws -> String { throw URLError(.unsupportedURL) }
+    func transfer(id: String, url: String, headers: [String: String], progress: @escaping DownloadProgressHandler) async throws -> String { throw URLError(.unsupportedURL) }
+    func cancel(id: String) {}
 }
 struct TestSong {
     let entry: QueueEntry
@@ -50,6 +49,7 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
     private(set) var transfers = 0
     var sharedRecording = false
     var resolutionFails = false
+    var verificationFails = false
     private var resolutions = 0
     func resolve(_ entry: QueueEntry, quality: String) async throws -> String {
         lock.withLock { resolutions += 1 }
@@ -57,15 +57,20 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         let id = sharedRecording ? "shared-recording" : entry.id
         return "{\"url\":\"fixture://audio\",\"provider\":\"fixture\",\"recordingIdentity\":\"\(id)\",\"codec\":\"PCM\",\"kbps\":1411,\"lossless\":true}"
     }
-    func transfer(id: String, url: String, headers: [String: String]) async throws -> String {
+    func transfer(id: String, url: String, headers: [String: String], progress: @escaping DownloadProgressHandler) async throws -> String {
         lock.withLock { active += 1; maximum = max(maximum, active); transfers += 1 }
         defer { lock.withLock { active -= 1 } }
+        progress(3, 13)
         try await Task.sleep(for: .milliseconds(350))
+        progress(13, 13)
         let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         try Data("audio fixture".utf8).write(to: path)
         return path.path
     }
     func cancel(id: String) {}
+    func verify(path: String, entry: QueueEntry, provider: String) async throws {
+        if verificationFails { throw NSError(domain: "Download", code: 6) }
+    }
     func resolutionCount() -> Int { lock.withLock { resolutions } }
     func counts() -> (Int, Int) { lock.withLock { (maximum, transfers) } }
 }
@@ -119,6 +124,20 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         try JSONEncoder().encode(substituted).write(to: substituteRoot.appendingPathComponent("index.json"))
         let substituteStore = DownloadStore(directory: substituteRoot, startWorker: false)
         assert(substituteStore.selectedYouTubeVideoId(for: path) == entry.videoId, "history retains the selected YouTube song for a saved lossless substitute")
+        let rejecting = FixtureBackend(); rejecting.verificationFails = true
+        let rejectedStore = DownloadStore(directory: substituteRoot, startWorker: false, backend: rejecting)
+        let rejectedAsset = await rejectedStore.playbackAsset(for: entry)
+        assert(rejectedAsset == nil && FileManager.default.fileExists(atPath: path), "legacy substitutions fail closed without deleting the user's saved file")
+        let acceptingStore = DownloadStore(directory: substituteRoot, startWorker: false, backend: FixtureBackend())
+        let acceptedAsset = await acceptingStore.playbackAsset(for: entry)
+        let acceptedIndex = try JSONDecoder().decode(FixtureIndex.self, from: Data(contentsOf: substituteRoot.appendingPathComponent("index.json")))
+        assert(acceptedAsset?.recordingVerified == true && acceptedIndex.assets[asset.id]?.recordingVerified == true, "a verified legacy substitution persists its recording check")
+        var originalAsset = asset; originalAsset.id = "original"; originalAsset.lossless = false; originalAsset.kbps = 128
+        substituted.assets[originalAsset.id] = originalAsset
+        try JSONEncoder().encode(substituted).write(to: substituteRoot.appendingPathComponent("index.json"))
+        let pinnedStore = DownloadStore(directory: substituteRoot, startWorker: false, backend: rejecting)
+        let pinnedAsset = await pinnedStore.playbackAsset(for: entry, onlyOriginal: true)
+        assert(pinnedAsset?.id == originalAsset.id, "reverting to original chooses saved YouTube bytes even when a higher-quality substitute also exists")
         assert(store.asset(for: other) == nil, "identical title is not recording identity")
         assert(store.download(entry) == .alreadyExists, "individual ownership reuses quality-compatible asset")
         store.removeOwner("first"); assert(FileManager.default.fileExists(atPath: path), "overlapping owner preserves audio")
@@ -184,9 +203,12 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         let worker = DownloadStore(directory: root.appendingPathComponent("worker"), legacyDirectory: legacyRoot, backend: backend)
         let entries = (0..<3).map { QueueEntry.youtube(videoId: "worker-\($0)", title: "Worker fixture", artist: "Validation") }
         entries.forEach { _ = worker.download($0) }
+        for _ in 0..<50 { if worker.activity(for: entries[0])?.received == 3 { break }; try await Task.sleep(for: .milliseconds(10)) }
+        assert(worker.activity(for: entries[0])?.phase == .transferring && worker.activity(for: entries[0])?.fraction != nil, "song activity reports actual transfer bytes before completion")
         for _ in 0..<100 { if !worker.restoring && worker.jobs.count == 3 && worker.jobs.allSatisfy({ $0.status == .done }) { break }; try await Task.sleep(for: .milliseconds(50)) }
         assert(worker.jobs.count == 3 && worker.jobs.allSatisfy { $0.status == .done }, "pending worker completes independent jobs")
         assert(entries.allSatisfy { worker.isDownloaded($0) }, "completed downloads populate row presence")
+        assert(worker.activity(for: entries[0])?.phase == .saved, "song activity becomes downloaded after publication")
         assert(backend.counts().0 == 2 && backend.counts().1 == 3, "worker permits exactly two concurrent transfers")
         let joiningBackend = FixtureBackend(); joiningBackend.sharedRecording = true
         let joining = DownloadStore(directory: root.appendingPathComponent("joining"), legacyDirectory: legacyRoot, backend: joiningBackend)
@@ -205,7 +227,8 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         NetworkQuality.shared.metered = true
         let blockedBackend = FixtureBackend()
         let blocked = DownloadStore(directory: root.appendingPathComponent("wifi"), legacyDirectory: legacyRoot, backend: blockedBackend)
-        _ = blocked.download(entries[0]); try await Task.sleep(for: .milliseconds(100))
+        _ = blocked.download(entries[0]); await blocked.waitUntilReady()
+        try await Task.sleep(for: .milliseconds(100))
         assert(blocked.jobs[0].status == .queued && blockedBackend.counts().1 == 0, "Wi-Fi policy keeps intent pending")
         NetworkQuality.shared.metered = false
         blocked.networkPolicyChanged()
@@ -213,7 +236,8 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         assert(blocked.jobs[0].status == .done, "worker resumes when unmetered connectivity returns")
         let stoppingBackend = FixtureBackend()
         let stopping = DownloadStore(directory: root.appendingPathComponent("wifi-active"), legacyDirectory: legacyRoot, backend: stoppingBackend)
-        _ = stopping.download(entries[0]); try await Task.sleep(for: .milliseconds(100))
+        _ = stopping.download(entries[0]); await stopping.waitUntilReady()
+        try await Task.sleep(for: .milliseconds(100))
         NetworkQuality.shared.metered = true; stopping.networkPolicyChanged()
         assert(stopping.jobs[0].status == .queued, "metered change cancels an active transfer and retains intent")
         NetworkQuality.shared.metered = false; stopping.networkPolicyChanged()
@@ -257,6 +281,7 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         log.markCleanExit(); log.clearHistory()
         assert(try! FileManager.default.contentsOfDirectory(at: logDirectory, includingPropertiesForKeys: nil).count == 1, "clear diagnostic history starts a fresh run")
         try? FileManager.default.removeItem(at: report)
+        try await NetworkChecks.run(root: root)
         print("Download and diagnostic persistence checks complete")
     }
     @MainActor static func otherJobId(_ store: DownloadStore) -> String { store.jobs[0].id }

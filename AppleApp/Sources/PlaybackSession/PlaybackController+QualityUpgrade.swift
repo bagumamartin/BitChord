@@ -68,6 +68,7 @@ extension PlaybackController {
     }
 
     func lookForBetterCopy(_ entry: QueueEntry, codec: String, kbps: UInt32) {
+        guard NetworkQuality.shared.connected else { return }
         guard !entry.isLocal, entry.source.hasPrefix("yt:") else { return }
         let mediaId = entry.id
         // A pinned track is held off the automatic search on purpose: the
@@ -246,12 +247,20 @@ extension PlaybackController {
             path = try? await Self.streamViaKtor(
                 videoId: "\(mediaId)#\(QualityUpgrade.upgraded)",
                 url: stream.url,
-                headers: stream.headers
+                headers: stream.headers, codec: stream.format.codec ?? "unknown", kbps: stream.format.kbps ?? 0,
+                durationSeconds: stream.durationSec
             )
         }
         guard let path else {
             QualityUpgrade.forget(mediaId)
             log.record("upgrade audition failed", about: mediaId)
+            return
+        }
+        guard await RecordingIdentityVerifier.matches(videoId: mediaId, candidate: path, allowTimingEdits: entry.isVideo) else {
+            guard !Task.isCancelled else { return }
+            QualityUpgrade.refuseUpgrades(mediaId); QualityUpgrade.forget(mediaId)
+            await StreamFileCache.shared.forget(videoId: "\(mediaId)#\(QualityUpgrade.upgraded)")
+            log.record("queued replacement rejected: decoded audio does not verify against the selected YouTube recording", about: mediaId)
             return
         }
         let allowsLosslessSources = await MainActor.run { PlaybackCodecCapabilities.shared.allowLosslessSources }
@@ -335,6 +344,7 @@ extension PlaybackController {
             log.record("upgrade could not join the blend", about: mediaId)
             return
         }
+        await StreamFileCache.shared.markRecordingVerified(mediaID: mediaId, cacheKey: "\(mediaId)#\(QualityUpgrade.upgraded)", sourcePath: path)
         await MainActor.run { [weak self] in
             guard let self, self.playGeneration == generation, self.nextEntry?.id == mediaId else { return }
             self.adoptAutomixPlan(plan)
@@ -377,7 +387,6 @@ extension PlaybackController {
             )
             return
         }
-        QualityUpgrade.force(mediaId, stream: stream)
         QualityUpgrade.beginAudition(mediaId)
         let warmed: String?
         if stream.url.hasPrefix("/") || stream.url.hasPrefix("file:") {
@@ -389,13 +398,26 @@ extension PlaybackController {
             warmed = try? await Self.streamViaKtor(
                 videoId: "\(mediaId)#\(QualityUpgrade.upgraded)",
                 url: stream.url,
-                headers: stream.headers
+                headers: stream.headers, codec: stream.format.codec ?? "unknown", kbps: stream.format.kbps ?? 0,
+                durationSeconds: stream.durationSec
             )
         }
         QualityUpgrade.endAudition(mediaId)
         guard let path = warmed else {
             QualityUpgrade.forget(mediaId)
             log.record("upgrade audition failed", about: mediaId)
+            return
+        }
+        guard await RecordingIdentityVerifier.matches(videoId: mediaId, candidate: path, allowTimingEdits: entry.isVideo) else {
+            guard !Task.isCancelled else { return }
+            QualityUpgrade.refuseUpgrades(mediaId); QualityUpgrade.forget(mediaId)
+            await StreamFileCache.shared.forget(videoId: "\(mediaId)#\(QualityUpgrade.upgraded)")
+            log.record("replacement rejected: decoded audio does not verify against the selected YouTube recording", about: mediaId)
+            await MainActor.run { [weak self] in
+                guard let self, self.playGeneration == generation, self.current?.id == mediaId else { return }
+                self.sourceDecisionNotes[mediaId] = "The alternative audio did not match the selected recording. Playback continues from the original."
+                self.racingLossless = false
+            }
             return
         }
         let again = await MainActor.run { () -> (Double, Bool, Double?, String?)? in
@@ -409,6 +431,10 @@ extension PlaybackController {
         guard let (nowPos, playing, loudnessDb, priorSource) = again else {
             QualityUpgrade.shelve(mediaId, stream: stream)
             log.record("upgrade proved but the queue moved on; shelved", about: mediaId)
+            return
+        }
+        if dur > 0 && dur - nowPos < horizon {
+            QualityUpgrade.shelve(mediaId, stream: stream)
             return
         }
         // Low-energy swap placement: defer swap execution to the next local energy
@@ -499,9 +525,11 @@ extension PlaybackController {
                 }
                 return
             }
+            await StreamFileCache.shared.markRecordingVerified(mediaID: mediaId, cacheKey: "\(mediaId)#\(QualityUpgrade.upgraded)", sourcePath: path)
             await MainActor.run {
                 guard self.playGeneration == generation, self.current?.id == mediaId else { return }
                 QualityUpgrade.unshelve(mediaId)
+                QualityUpgrade.force(mediaId, stream: stream)
                 self.engineLoadedId = entry.id
                 self.loadedSourcePath = info.source
                 self.loadedSourceHeaders = stream.headers

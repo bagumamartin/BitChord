@@ -9,6 +9,12 @@ import BitChordShared
 actor StreamFileCache {
     static let shared = StreamFileCache()
 
+    private let directory: URL?
+    private var verifiedFiles: [String: (bytes: Int64, modified: Date, hash: String)] = [:]
+    private var aliases: [String: [URL]]?
+    private var verifiedSources: [String: (hash: String, mediaID: String)] = [:]
+    init(directory: URL? = nil) { self.directory = directory }
+
     private static let defaultLimit: Int64 = 512 * 1024 * 1024
     private static let extensions = ["m4a", "mp4", "webm", "m4v", "aac", "flac", "ogg", "opus", "mp3", "wav", "aiff"]
 
@@ -25,6 +31,8 @@ actor StreamFileCache {
         var youtubeVideoId: String? = nil
         var relativeLoudnessDb: Double? = nil
         var durationSeconds: Int? = nil
+        var playbackMediaId: String? = nil
+        var recordingVerified: Bool? = nil
     }
     private var inFlight: [String: (path: String, quality: String, kbps: Int, loudnessDb: Double?, youtubeVideoId: String?, durationSeconds: Int?)] = [:]
     nonisolated static var qualityIdentity: String {
@@ -43,33 +51,72 @@ actor StreamFileCache {
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    var folder: URL { DiskCache.cachesSubfolder("audio") }
+    var folder: URL {
+        if let directory { try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); return directory }
+        return DiskCache.cachesSubfolder("audio")
+    }
 
-    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true) -> String? {
-        if allowGrowing, let active = inFlight[videoId], active.quality == Self.qualityIdentity,
+    private func verified(_ path: String, manifest: Manifest) -> Bool {
+        guard manifest.version == 1, manifest.complete, manifest.bytes > 0,
+              !FileManager.default.fileExists(atPath: path + ".failed"),
+              !FileManager.default.fileExists(atPath: path + ".playback-cancelled"),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let bytes = attributes[.size] as? NSNumber, bytes.int64Value == manifest.bytes,
+              let modified = attributes[.modificationDate] as? Date else { return false }
+        if let known = verifiedFiles[path], known.bytes == manifest.bytes,
+           known.modified == modified, known.hash == manifest.sha256 { return true }
+        guard hashFile(path) == manifest.sha256 else { verifiedFiles[path] = nil; return false }
+        if verifiedFiles.count >= 256 { verifiedFiles.removeAll(keepingCapacity: true) }
+        verifiedFiles[path] = (manifest.bytes, modified, manifest.sha256)
+        return true
+    }
+
+    /// Network ceilings limit fetched bytes, not files already on disk. Keep the
+    /// music-video preference separate so a preference change still takes effect.
+    nonisolated static func compatiblePlaybackIdentity(_ saved: String, _ current: String) -> Bool {
+        let old = saved.split(separator: "|"), new = current.split(separator: "|")
+        return old.count == 3 && new.count == 3 ? old[2] == new[2] : saved == current
+    }
+
+    private func aliasedFiles(for id: String) -> [URL] {
+        if aliases == nil {
+            aliases = [:]
+            let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "json" {
+                if let data = try? Data(contentsOf: file), let manifest = try? JSONDecoder().decode(Manifest.self, from: data), manifest.recordingVerified == true, let id = manifest.playbackMediaId {
+                    aliases?[id, default: []].append(file.deletingPathExtension())
+                }
+            }
+        }
+        return aliases?[id] ?? []
+    }
+
+    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true, allowQualityFallback: Bool = false, onlyOriginal: Bool = false) -> String? {
+        if allowGrowing, let active = inFlight[videoId],
+           (active.quality == Self.qualityIdentity || (allowQualityFallback && Self.compatiblePlaybackIdentity(active.quality, Self.qualityIdentity))),
            FileManager.default.fileExists(atPath: active.path),
            !FileManager.default.fileExists(atPath: active.path + ".failed"),
            !FileManager.default.fileExists(atPath: active.path + ".playback-cancelled"),
-           !requireLossless, active.kbps <= maxKbps { return active.path }
-        for ext in Self.extensions {
-        let dest = cachedURL(for: videoId, ext: ext)
+           !requireLossless, active.kbps <= maxKbps,
+           !onlyOriginal || active.youtubeVideoId == videoId { return active.path }
+        let candidates = (onlyOriginal ? [] : aliasedFiles(for: videoId)) + Self.extensions.map { cachedURL(for: videoId, ext: $0) }
+        for dest in candidates {
         guard !FileManager.default.fileExists(atPath: dest.path + ".failed"),
               !FileManager.default.fileExists(atPath: dest.path + ".playback-cancelled"),
               let data = try? Data(contentsOf: manifestURL(dest.path)),
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.version == 1, manifest.complete, manifest.codec != "unknown",
-              manifest.recordingIdentity == videoId,
-              manifest.quality == Self.qualityIdentity,
+              manifest.recordingIdentity == videoId || (manifest.playbackMediaId == videoId && manifest.recordingVerified == true),
+              !onlyOriginal || manifest.youtubeVideoId == videoId,
+              (manifest.quality == Self.qualityIdentity || (allowQualityFallback && Self.compatiblePlaybackIdentity(manifest.quality, Self.qualityIdentity))),
               manifest.kbps <= maxKbps,
               !requireLossless || ["FLAC", "ALAC", "PCM"].contains(manifest.codec),
-              let bytes = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size]) as? NSNumber,
-              bytes.int64Value == manifest.bytes,
-              hashFile(dest.path) == manifest.sha256 else { continue }
+              verified(dest.path, manifest: manifest) else { continue }
         // A legacy entry needs a fresh resolution: its quality and completion
         // cannot be established from a file extension. Keep its bytes for any
         // active reader while the new rendition is resolved.
 
-        DiskCache.touch(dest)
+        DiskCache.touch(manifestURL(dest.path))
         return dest.path
         }
         return nil
@@ -77,16 +124,15 @@ actor StreamFileCache {
 
     /// Downloads can adopt verified completed YouTube bytes, independent of
     /// streaming network ceilings. Substitute renditions need their own identity.
-    func completedDownloadPath(videoId: String, requireLossless: Bool, minimumKbps: Int) -> String? {
+    func completedDownloadPath(videoId: String, requireLossless: Bool, minimumKbps: Int, maximumKbps: Int = Int.max) -> String? {
         for ext in Self.extensions {
             let dest = cachedURL(for: videoId, ext: ext)
             guard let data = try? Data(contentsOf: manifestURL(dest.path)),
                   let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
                   manifest.complete, manifest.recordingIdentity == videoId,
-                  manifest.youtubeVideoId == videoId, manifest.kbps >= minimumKbps,
+                  manifest.youtubeVideoId == videoId, manifest.kbps >= minimumKbps, manifest.kbps <= maximumKbps,
                   !requireLossless || ["FLAC", "ALAC", "PCM"].contains(manifest.codec.uppercased()),
-                  let bytes = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size]) as? NSNumber,
-                  bytes.int64Value == manifest.bytes, hashFile(dest.path) == manifest.sha256 else { continue }
+                  verified(dest.path, manifest: manifest) else { continue }
             return dest.path
         }
         return nil
@@ -124,31 +170,64 @@ actor StreamFileCache {
     /// The download has its first bytes. Later resolves of the same track must
     /// join this file instead of starting a second fetch at the handoff.
     func noteGrowing(videoId: String, path: String, kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil) {
+        guard !FileManager.default.fileExists(atPath: path + ".complete") else { return }
         inFlight[videoId] = (path, quality ?? Self.qualityIdentity, kbps, relativeLoudnessDb, youtubeVideoId, durationSeconds)
     }
 
     /// The download failed before it finished. Drop the pointer so the next
     /// resolve fetches again. The bytes already handed to a player stay put.
-    func dropGrowing(videoId: String) {
-        inFlight.removeValue(forKey: videoId)
+    func dropGrowing(videoId: String, path: String? = nil) {
+        if path == nil || inFlight[videoId]?.path == path { inFlight.removeValue(forKey: videoId) }
     }
 
     func store(_ videoId: String, path: String, sourceIdentity: String = "unknown", codec: String = "unknown", kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil) {
-        inFlight[videoId] = (path, quality ?? Self.qualityIdentity, kbps, relativeLoudnessDb, youtubeVideoId, durationSeconds)
-        let dest = cachedURL(for: videoId, ext: URL(fileURLWithPath: path).pathExtension)
+        defer { if inFlight[videoId]?.path == path { inFlight.removeValue(forKey: videoId) } }
+        guard !FileManager.default.fileExists(atPath: path + ".failed"),
+              !FileManager.default.fileExists(atPath: path + ".grow") || FileManager.default.fileExists(atPath: path + ".complete") else { return }
+        let suppliedExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let ext = Self.extensions.contains(suppliedExtension) ? suppliedExtension : (AudioDownloadContainer.fileExtension(at: path) ?? suppliedExtension)
+        let dest = cachedURL(for: videoId, ext: ext)
         let fm = FileManager.default
         if dest.path != path {
-            try? fm.removeItem(at: dest)
-            try? fm.copyItem(atPath: path, toPath: dest.path)
+            let staged = folder.appendingPathComponent(".incoming-" + UUID().uuidString)
+            defer { try? fm.removeItem(at: staged) }
+            do {
+                try fm.copyItem(atPath: path, toPath: staged.path)
+                if fm.fileExists(atPath: dest.path) { _ = try fm.replaceItemAt(dest, withItemAt: staged) }
+                else { try fm.moveItem(at: staged, to: dest) }
+            } catch { return }
             // Leave `path` in place: the decoder may still be reading that file.
         }
+        DiskCache.allowLockedPlayback(dest)
         guard let bytes = (try? fm.attributesOfItem(atPath: dest.path)[.size]) as? NSNumber,
               let hash = hashFile(dest.path), bytes.int64Value > 0 else { return }
-        let manifest = Manifest(codec: codec, kbps: kbps, quality: quality ?? Self.qualityIdentity, sourceIdentity: sourceIdentity, recordingIdentity: videoId, complete: true, bytes: bytes.int64Value, sha256: hash, youtubeVideoId: youtubeVideoId, relativeLoudnessDb: relativeLoudnessDb, durationSeconds: durationSeconds)
+        let playbackMediaId = videoId.contains("#") ? String(videoId.prefix(while: { $0 != "#" })) : nil
+        let cachedCodec = codec == "unknown" ? (AudioDownloadContainer.fileExtension(at: dest.path)?.uppercased() ?? codec) : codec
+        let recordingVerified = playbackMediaId.map { $0.hasPrefix("src:") || $0.hasPrefix("saavn:") || (verifiedSources[videoId]?.hash == hash && verifiedSources[videoId]?.mediaID == $0) } ?? true
+        let manifest = Manifest(codec: cachedCodec, kbps: kbps, quality: quality ?? Self.qualityIdentity, sourceIdentity: sourceIdentity, recordingIdentity: videoId, complete: true, bytes: bytes.int64Value, sha256: hash, youtubeVideoId: youtubeVideoId, relativeLoudnessDb: relativeLoudnessDb, durationSeconds: durationSeconds, playbackMediaId: playbackMediaId, recordingVerified: recordingVerified)
         guard let data = try? JSONEncoder().encode(manifest), (try? data.write(to: manifestURL(dest.path), options: .atomic)) != nil else { return }
         inFlight.removeValue(forKey: videoId)
-        DiskCache.touch(dest)
+        if let playbackMediaId { aliases?[playbackMediaId]?.removeAll { $0 == dest } }
+        if let playbackMediaId, recordingVerified {
+            _ = aliasedFiles(for: playbackMediaId)
+            aliases?[playbackMediaId]?.removeAll { $0 == dest }
+            aliases?[playbackMediaId, default: []].insert(dest, at: 0)
+        }
+        DiskCache.touch(manifestURL(dest.path))
         trim(keeping: videoId)
+    }
+
+    func markRecordingVerified(mediaID: String, cacheKey: String, sourcePath: String) {
+        guard !FileManager.default.fileExists(atPath: sourcePath + ".failed"), let hash = hashFile(sourcePath) else { return }
+        if verifiedSources.count >= 128 { verifiedSources.removeAll(keepingCapacity: true) }
+        verifiedSources[cacheKey] = (hash, mediaID)
+        let cached = cachedURL(for: cacheKey)
+        guard var manifest = metadata(at: cached.path), manifest.sha256 == hash else { return }
+        manifest.recordingVerified = true; manifest.playbackMediaId = mediaID
+        guard let data = try? JSONEncoder().encode(manifest), (try? data.write(to: manifestURL(cached.path), options: .atomic)) != nil else { return }
+        _ = aliasedFiles(for: mediaID)
+        aliases?[mediaID]?.removeAll { $0 == cached }
+        aliases?[mediaID, default: []].insert(cached, at: 0)
     }
 
     func storeDuration(_ seconds: Int, at path: String) {
@@ -159,6 +238,9 @@ actor StreamFileCache {
 
     func clear() {
         inFlight.removeAll()
+        verifiedFiles.removeAll()
+        aliases = nil
+        verifiedSources.removeAll()
         DiskCache.clearFolder(folder)
     }
 
@@ -189,27 +271,26 @@ actor StreamFileCache {
         for manifestFile in urls where manifestFile.pathExtension == "json" {
             guard let data = try? Data(contentsOf: manifestFile),
                   let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
-                  manifest.complete else { continue }
+                  manifest.complete,
+                  (!manifest.recordingIdentity.contains("#") && manifest.playbackMediaId == nil) || manifest.recordingVerified == true else { continue }
             let audio = manifestFile.deletingPathExtension()
             guard FileManager.default.fileExists(atPath: audio.path) else { continue }
             let values = try? audio.resourceValues(forKeys: Set(keys))
             out.append(CachedEntry(
-                videoId: manifest.youtubeVideoId ?? manifest.recordingIdentity,
+                videoId: manifest.playbackMediaId ?? manifest.youtubeVideoId ?? manifest.recordingIdentity,
                 bytes: Int64(values?.fileSize ?? 0),
                 durationSeconds: manifest.durationSeconds,
                 codec: manifest.codec,
                 modified: values?.contentModificationDate ?? .distantPast
             ))
         }
-        return out.sorted { $0.modified > $1.modified }
+        var seen: Set<String> = []
+        return out.sorted { $0.modified > $1.modified }.filter { seen.insert($0.videoId).inserted }
     }
 
     /// Drops one track's cached audio and its manifest.
     func remove(_ videoId: String) {
-        let url = cachedURL(for: videoId)
-        try? FileManager.default.removeItem(at: url)
-        try? FileManager.default.removeItem(at: manifestURL(url.path))
-        inFlight.removeValue(forKey: videoId)
+        forget(videoId: videoId)
     }
 
     /// Drops everything cached for one track, and forgets where it was growing.
@@ -224,6 +305,10 @@ actor StreamFileCache {
     func forget(videoId: String) {
         let growing = inFlight.removeValue(forKey: videoId)
         let fm = FileManager.default
+        for file in aliasedFiles(for: videoId) {
+            try? fm.removeItem(at: file); try? fm.removeItem(at: manifestURL(file.path))
+        }
+        aliases?[videoId] = nil
         for ext in Self.extensions {
             let url = folder.appendingPathComponent("\(Self.sanitized(videoId)).\(ext)")
             if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: url); try? fm.removeItem(at: manifestURL(url.path)) }
@@ -233,9 +318,28 @@ actor StreamFileCache {
         }
     }
 
-    func trim(keeping videoId: String? = nil) {
-        let limit = PlatformSettings.shared.getLong(key: "audio_cache_limit_bytes", default: Self.defaultLimit)
-        DiskCache.trimFolder(folder, limitBytes: limit, keepingPrefix: videoId.map(Self.sanitized))
+    func trim(keeping videoId: String? = nil, limitBytes: Int64? = nil) {
+        let limit = limitBytes ?? PlatformSettings.shared.getLong(key: "audio_cache_limit_bytes", default: Self.defaultLimit)
+        let files = FileManager.default
+        let urls = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+        var total = urls.reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        let audio = urls.filter { Self.extensions.contains($0.pathExtension) }.sorted {
+            ((try? manifestURL($0.path).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                < ((try? manifestURL($1.path).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }
+        for file in audio where total > limit {
+            guard file.deletingPathExtension().lastPathComponent != videoId.map(Self.sanitized),
+                  !sourceHasPlaybackReaders(source: file.path) else { continue }
+            if let id = metadata(at: file.path)?.playbackMediaId {
+                aliases?[id]?.removeAll { $0 == file }
+                if aliases?[id]?.isEmpty == true { aliases?[id] = nil }
+            }
+            for part in [file, manifestURL(file.path), file.appendingPathExtension("loudness.json")] {
+                let bytes = Int64((try? part.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                if (try? files.removeItem(at: part)) != nil { total -= bytes }
+            }
+            verifiedFiles[file.path] = nil
+        }
     }
 
     private func cachedURL(for videoId: String, ext: String? = nil) -> URL {
@@ -370,10 +474,16 @@ actor CanvasFileCache {
 }
 
 enum DiskCache {
+    static func allowLockedPlayback(_ url: URL) {
+        #if os(iOS)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
+        #endif
+    }
     static func cachesSubfolder(_ name: String) -> URL {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BitChord/\(name)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if name == "audio" { allowLockedPlayback(dir) }
         return dir
     }
 

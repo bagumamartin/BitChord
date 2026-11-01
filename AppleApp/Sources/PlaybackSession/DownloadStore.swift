@@ -13,32 +13,6 @@ struct DownloadedTrack: Identifiable, Hashable {
     var id: String { path }
 }
 
-protocol DownloadBackend: Sendable {
-    func resolve(_ entry: QueueEntry, quality: String) async throws -> String
-    func transfer(id: String, url: String, headers: [String: String]) async throws -> String
-    func cancel(id: String)
-}
-private struct BridgeDownloadBackend: DownloadBackend {
-    func resolve(_ entry: QueueEntry, quality: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            DownloadBridge.shared.resolveAtQuality(videoId: entry.videoId ?? entry.id, title: entry.title,
-                artist: entry.artist, qualityName: quality, callback: ResolveAdapter { json, error in
-                if let json { continuation.resume(returning: json) }
-                else { continuation.resume(throwing: NSError(domain: "Download", code: 1, userInfo: [NSLocalizedDescriptionKey: error ?? "Resolution failed"])) }
-            })
-        }
-    }
-    func transfer(id: String, url: String, headers: [String: String]) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            StreamDownloadBridge.shared.download(downloadId: id, url: url, headers: headers, callback: DoneAdapter { path, error in
-                if let path { continuation.resume(returning: path) }
-                else { continuation.resume(throwing: NSError(domain: "Download", code: 2, userInfo: [NSLocalizedDescriptionKey: error ?? "Download failed"])) }
-            })
-        }
-    }
-    func cancel(id: String) { StreamDownloadBridge.shared.cancel(downloadId: id) }
-}
-
 /// Durable intent and assets are separate: collections own requests, requests
 /// resolve to renditions, and several requests may share one physical file.
 @MainActor @Observable
@@ -57,6 +31,9 @@ final class DownloadStore {
         var attempts = 0
         var retryAt: Date? = nil
         var cancelled = false
+        var resolved: ResolvedDownload? = nil
+        var youtubeFallback: Bool? = nil
+        var requiresNetwork: Bool? = nil
     }
     struct Owner: Identifiable, Codable {
         var id: String
@@ -82,6 +59,7 @@ final class DownloadStore {
         var bitDepth: Int? = nil
         var quality: String? = nil
         var entryKeys: Set<String>? = nil
+        var recordingVerified: Bool? = nil
     }
     private struct Index: Codable {
         var version = 1
@@ -102,8 +80,10 @@ final class DownloadStore {
     private(set) var items: [DownloadedTrack] = []
     private(set) var downloadedEntryKeys: Set<String> = []
     var jobs: [Job] = []
+    private(set) var activities: [String: DownloadActivity] = [:]
     var onChange: (() -> Void)?
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var taskVersions: [String: UUID] = [:]
     private var transferring: Set<String> = []
     private var leasePaths: Set<String> = []
     private var timer: Timer?
@@ -145,7 +125,7 @@ final class DownloadStore {
                     self.historyOriginsByPath = nil
                     self.jobs = restoredIndex.jobs.map { job in
                         var job = job
-                        if job.status == .running { job.status = .queued; job.runID = UUID().uuidString }
+                        if job.status == .running { job.status = .queued }
                         return job
                     }
                     self.refreshDownloadedEntryKeys()
@@ -172,7 +152,7 @@ final class DownloadStore {
             }
             jobs = index.jobs.map { job in
                 var job = job
-                if job.status == .running { job.status = .queued; job.runID = UUID().uuidString }
+                if job.status == .running { job.status = .queued }
                 return job
             }
         } catch {
@@ -201,10 +181,21 @@ final class DownloadStore {
     nonisolated private static func readIndex(directory: URL, legacyFolder: URL) -> Result<Index, Error> {
         do {
             try FileManager.default.createDirectory(at: directory.appendingPathComponent("audio"), withIntermediateDirectories: true)
+            DiskCache.allowLockedPlayback(directory)
+            DiskCache.allowLockedPlayback(directory.appendingPathComponent("audio"))
             let url = directory.appendingPathComponent("index.json")
             var index = FileManager.default.fileExists(atPath: url.path)
                 ? try JSONDecoder().decode(Index.self, from: Data(contentsOf: url)) : Index()
             guard index.version == 1 else { throw CocoaError(.fileReadCorruptFile) }
+            var rebased = false
+            for (id, asset) in index.assets where asset.managed {
+                let current = directory.appendingPathComponent("audio").appendingPathComponent(URL(fileURLWithPath: asset.path).lastPathComponent)
+                if asset.path != current.path, FileManager.default.fileExists(atPath: current.path), hashFile(current.path) == asset.sha256 {
+                    var moved = asset; moved.path = current.path; index.assets[id] = moved; rebased = true
+                }
+            }
+            if rebased { try JSONEncoder().encode(index).write(to: url, options: .atomic) }
+            for asset in index.assets.values { DiskCache.allowLockedPlayback(URL(fileURLWithPath: asset.path)) }
             if !index.migrated {
                 let files = (try? FileManager.default.contentsOfDirectory(at: legacyFolder, includingPropertiesForKeys: nil)) ?? []
                 for file in files where ["m4a", "mp3", "flac", "mp4", "aac", "opus", "ogg", "wav"].contains(file.pathExtension.lowercased()) {
@@ -245,6 +236,7 @@ final class DownloadStore {
         historyOriginsByPath = nil
         guard writable else { return }
         index.jobs = jobs
+        refreshActivities()
         do { try JSONEncoder().encode(index).write(to: indexURL, options: .atomic) }
         catch { writable = false; PlaybackDebugLog.shared.record("download index save failed: \(error)") }
     }
@@ -257,6 +249,28 @@ final class DownloadStore {
         downloadedEntryKeys.contains(entryKey(entry))
     }
     private func entryKey(_ entry: QueueEntry) -> String { canonicalPath(entry.source) + "|" + entry.id }
+    func activity(for entry: QueueEntry) -> DownloadActivity? { activities[entryKey(entry)] }
+    func activity(for job: Job) -> DownloadActivity? { activity(for: job.entry) }
+    private func refreshActivities() {
+        let retained = Set(jobs.map { entryKey($0.entry) })
+        for key in Array(activities.keys) where !retained.contains(key) { activities[key] = nil }
+        for job in jobs {
+            let key = entryKey(job.entry)
+            let activity = activities[key] ?? DownloadActivity()
+            if activities[key] == nil { activities[key] = activity }
+            activity.detail = job.message
+            switch job.status {
+            case .queued:
+                activity.phase = !NetworkQuality.shared.connected ? .waitingForNetwork
+                    : (NetworkQuality.shared.metered && PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true) ? .waitingForWiFi : .queued)
+            case .running:
+                if !NetworkQuality.shared.connected { activity.phase = .waitingForNetwork }
+                else if activity.phase != .transferring && activity.phase != .verifying { activity.phase = .resolving }
+            case .done: activity.phase = .saved
+            case .failed: activity.phase = job.cancelled ? .cancelled : .failed
+            }
+        }
+    }
     /// A presence snapshot for rows; menus still validate the rendition with asset(for:).
     /// Keep request aliases on the asset because several songs can share one recording.
     private func refreshDownloadedEntryKeys() {
@@ -320,16 +334,30 @@ final class DownloadStore {
         }
     }
     func waitForRefresh() async { await refreshTask?.value }
-    func asset(for entry: QueueEntry, quality: String? = nil) -> Asset? {
+    func asset(for entry: QueueEntry, quality: String? = nil, onlyOriginal: Bool = false) -> Asset? {
         let candidates = index.assets.values.filter { asset in
-            (asset.entry.source == entry.source && asset.entry.id == entry.id) || canonicalPath(asset.path) == canonicalPath(entry.source) ||
-            ["STANDARD", "HIGH", "LOSSLESS"].contains { quality in index.bindings[requestId(entry, quality: quality)] == asset.id }
+            (!onlyOriginal || asset.youtubeVideoId == entry.videoId) && (
+                (asset.entry.source == entry.source && asset.entry.id == entry.id) || canonicalPath(asset.path) == canonicalPath(entry.source) ||
+                ["STANDARD", "HIGH", "LOSSLESS"].contains { quality in index.bindings[requestId(entry, quality: quality)] == asset.id }
+            )
         }
         return candidates.sorted { ($0.lossless ? Int.max : $0.kbps) > ($1.lossless ? Int.max : $1.kbps) }.first {
             (quality != "LOSSLESS" || $0.lossless) && (quality != "HIGH" || $0.lossless || $0.kbps >= 128) && valid($0)
         }
     }
     func provenance(for path: String) -> String? { index.assets.values.first { canonicalPath($0.path) == canonicalPath(path) }?.youtubeVideoId }
+    /// Older downloads retain their files, but automatic substitutions must
+    /// establish audio identity before being reused for a YouTube selection.
+    func playbackAsset(for entry: QueueEntry, onlyOriginal: Bool = false) async -> Asset? {
+        guard var asset = asset(for: entry, onlyOriginal: onlyOriginal) else { return nil }
+        if entry.source.hasPrefix("yt:"), asset.youtubeVideoId != entry.videoId, asset.recordingVerified != true {
+            do { try await backend.verify(path: asset.path, entry: entry, provider: asset.provider) }
+            catch { return nil }
+            guard !Task.isCancelled, index.assets[asset.id]?.sha256 == asset.sha256 else { return nil }
+            asset.recordingVerified = true; index.assets[asset.id] = asset; persist()
+        }
+        return asset
+    }
     /// History belongs to the selected YouTube song, even when its saved audio
     /// came from a lossless substitute. Region analysis still uses `provenance`.
     func selectedYouTubeVideoId(for path: String) -> String? {
@@ -428,17 +456,20 @@ final class DownloadStore {
     @discardableResult func retry(_ id: String) -> RequestResult {
         guard let i = jobs.firstIndex(where: { $0.id == id && $0.status == .failed }) else { return .alreadyExists }
         jobs[i].status = .queued; jobs[i].attempts = 0; jobs[i].retryAt = nil; jobs[i].cancelled = false
+        jobs[i].message = nil
         persist(); pump(); return .started
     }
     func cancel(_ id: String, restartWorker: Bool = true) {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
         backend.cancel(id: jobs[i].runID)
         tasks[id]?.cancel(); tasks.removeValue(forKey: id)
+        taskVersions[id] = nil
         jobs[i].runID = UUID().uuidString; jobs[i].status = .failed; jobs[i].cancelled = true; jobs[i].message = "Cancelled"
+        jobs[i].resolved = nil
         persist(); if restartWorker { pump() }
     }
     func cancelAll() { if afterRestore({ self.cancelAll() }) { return }; for id in jobs.filter({ $0.status == .queued || $0.status == .running }).map(\.id) { cancel(id) } }
-    func clearFinishedJobs() { if afterRestore({ self.clearFinishedJobs() }) { return }; jobs.removeAll { $0.status == .done }; persist() }
+    func clearFinishedJobs() { if afterRestore({ self.clearFinishedJobs() }) { return }; jobs.removeAll { $0.status == .done || $0.status == .failed }; persist() }
     func delete(_ path: String) {
         if afterRestore({ self.delete(path) }) { return }
         guard let asset = index.assets.values.first(where: { canonicalPath($0.path) == canonicalPath(path) }) else { return }
@@ -452,6 +483,7 @@ final class DownloadStore {
     private func prune() {
         guard writable else { return }
         let requests = Set(index.owners.values.flatMap(\.requests))
+        let previousJobs = jobs.count, previousBindings = index.bindings.count
         for job in jobs where !requests.contains(job.id) && job.status == .running { cancel(job.id, restartWorker: false) }
         jobs.removeAll { !requests.contains($0.id) }
         index.bindings = index.bindings.filter { requests.contains($0.key) }
@@ -469,48 +501,78 @@ final class DownloadStore {
             index.pendingDeletes?.remove(asset.id)
         }
         if removedAsset { refreshDownloadedEntryKeys() }
-        persist()
+        if removedAsset || jobs.count != previousJobs || index.bindings.count != previousBindings { persist() }
     }
     func networkPolicyChanged() { pump() }
     private func pump() {
         guard writable, workersEnabled else { return }
-        if !NetworkQuality.shared.connected || (NetworkQuality.shared.metered && PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true)) {
+        guard jobs.contains(where: { $0.status == .queued || $0.status == .running }) else { return }
+        let networkAllowed = NetworkQuality.shared.connected && !(NetworkQuality.shared.metered && PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true))
+        if NetworkQuality.shared.connected && !networkAllowed {
+            var changed = false
             for i in jobs.indices where jobs[i].status == .running {
-                backend.cancel(id: jobs[i].runID)
+                backend.pause(id: jobs[i].runID)
                 tasks.removeValue(forKey: jobs[i].id)?.cancel()
-                jobs[i].runID = UUID().uuidString
+                taskVersions[jobs[i].id] = nil
+                // Keep the transfer identity so URLSession resume data can be adopted.
                 jobs[i].status = .queued; jobs[i].attempts = max(0, jobs[i].attempts - 1)
+                changed = true
             }
-            persist(); return
+            if changed { persist() }
         }
+        refreshActivities()
         for id in jobs.filter({ $0.status == .queued && !$0.cancelled && ($0.retryAt ?? .distantPast) <= Date() }).map(\.id) {
             guard tasks.count < 2, let i = jobs.firstIndex(where: { $0.id == id }) else { break }
+            guard networkAllowed || (jobs[i].requiresNetwork != true && backend.hasCompletedTransfer(id: jobs[i].runID)) else { continue }
             jobs[i].status = .running; jobs[i].attempts += 1
+            jobs[i].requiresNetwork = nil
             let job = jobs[i]; persist()
+            let version = UUID(); taskVersions[id] = version
             tasks[id] = Task { [weak self] in
                 guard let self else { return }
-                do { try await self.transfer(job) }
+                do { try await self.transfer(job, version: version) }
                 catch {
-                    if let i = self.jobs.firstIndex(where: { $0.id == id && $0.runID == job.runID }) {
+                    if let i = self.jobs.firstIndex(where: { $0.id == id && $0.runID == job.runID && $0.status == .running }), !Task.isCancelled {
+                        let failure = error as NSError
+                        if NetworkQuality.shared.connected, job.entry.source.hasPrefix("yt:"), self.jobs[i].resolved?.provider.hasPrefix("source:") == true,
+                           (failure.domain == "Download" || (failure.domain == NSURLErrorDomain && failure.code == URLError.cannotDecodeContentData.rawValue)) {
+                            self.jobs[i].youtubeFallback = true
+                        }
                         self.jobs[i].message = PlaybackDebugLog.sanitize(error.localizedDescription)
-                        self.jobs[i].status = self.jobs[i].attempts < 3 ? .queued : .failed
-                        self.jobs[i].retryAt = Date().addingTimeInterval(pow(2, Double(self.jobs[i].attempts)) * 2)
+                        if !NetworkQuality.shared.connected {
+                            self.jobs[i].requiresNetwork = true
+                            self.jobs[i].status = .queued
+                            self.jobs[i].attempts = max(0, self.jobs[i].attempts - 1)
+                            self.jobs[i].retryAt = nil
+                        } else {
+                            self.jobs[i].status = self.jobs[i].attempts < 3 ? .queued : .failed
+                            self.jobs[i].retryAt = Date().addingTimeInterval(pow(2, Double(self.jobs[i].attempts)) * 2)
+                        }
                         PlaybackDebugLog.shared.record("download failed: \(error)", about: id)
                     }
                 }
-                if self.jobs.contains(where: { $0.id == id && $0.runID == job.runID }) { self.tasks.removeValue(forKey: id) }
+                if self.taskVersions[id] == version { self.tasks.removeValue(forKey: id); self.taskVersions[id] = nil }
                 self.persist(); self.refresh(); self.pump()
             }
         }
     }
-    private func transfer(_ job: Job) async throws {
-        let payload = try await backend.resolve(job.entry, quality: job.quality)
+    private func transfer(_ job: Job, version: UUID) async throws {
+        let progress: DownloadProgressHandler = { [weak self] received, total in
+            Task { @MainActor [weak self] in
+                guard let self, self.taskVersions[job.id] == version,
+                      self.jobs.contains(where: { $0.id == job.id && $0.runID == job.runID && $0.status == .running }) else { return }
+                self.activity(for: job.entry)?.update(received: received, total: total)
+            }
+        }
+        let restored = job.resolved != nil ? try await backend.restoreTransfer(id: job.runID, progress: progress) : nil
+        let payload = restored == nil ? try await backend.resolve(job.entry, quality: job.quality, youtubeFallback: job.youtubeFallback == true) : nil
         try Task.checkCancellation()
-        var hit = try JSONDecoder().decode(ResolvedDownload.self, from: Data(payload.utf8))
+        var hit = try payload.map { try JSONDecoder().decode(ResolvedDownload.self, from: Data($0.utf8)) } ?? job.resolved!
         if hit.provider.hasPrefix("custom:") { hit.provider = "custom:" + Self.digest(hit.provider) }
         var cached: String?
-        if hit.provider == "youtube" {
-            cached = await StreamFileCache.shared.completedDownloadPath(videoId: hit.recordingIdentity ?? job.entry.id, requireLossless: job.quality == "LOSSLESS", minimumKbps: job.quality == "HIGH" ? 128 : 0)
+        if restored == nil, hit.provider == "youtube" {
+            cached = await StreamFileCache.shared.completedDownloadPath(videoId: hit.recordingIdentity ?? job.entry.id, requireLossless: hit.lossless == true,
+                minimumKbps: max(hit.kbps ?? 0, job.quality == "HIGH" ? 128 : 0), maximumKbps: job.quality == "STANDARD" ? 128 : Int.max)
         }
         if let cached, let metadata = await StreamFileCache.shared.metadata(at: cached) {
             hit.codec = metadata.codec; hit.kbps = metadata.kbps
@@ -521,23 +583,46 @@ final class DownloadStore {
         let assetId = Self.digest(hit.provider + "|" + identity + "|" + codec + "|\(hit.kbps ?? 0)|\(hit.sampleRate ?? 0)|\(hit.bitDepth ?? 0)|\(hit.lossless ?? false)")
         while transferring.contains(assetId) { try await Task.sleep(for: .milliseconds(100)) }
         try Task.checkCancellation()
-        if let existing = index.assets[assetId], valid(existing) { finishJob(job, asset: existing); return }
+        if var existing = index.assets[assetId], valid(existing) {
+            if existing.recordingVerified != true {
+                try await backend.verify(path: existing.path, entry: job.entry, provider: hit.provider)
+                try Task.checkCancellation()
+                existing.recordingVerified = true; index.assets[assetId] = existing
+            }
+            finishJob(job, asset: existing); persist(); backend.finish(id: job.runID); return
+        }
         transferring.insert(assetId); defer { transferring.remove(assetId) }
+        if let i = jobs.firstIndex(where: { $0.id == job.id && $0.runID == job.runID }) {
+            var metadata = hit; metadata.url = ""; metadata.headers = nil
+            jobs[i].resolved = metadata; persist()
+        }
         let path: String
-        if let cached {
+        if let restored { path = restored }
+        else if let cached {
             let temporary = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension(URL(fileURLWithPath: cached).pathExtension)
             try FileManager.default.copyItem(atPath: cached, toPath: temporary.path); path = temporary.path
         } else {
-            path = try await backend.transfer(id: job.runID, url: hit.url, headers: hit.headers ?? [:])
+            path = try await backend.transfer(id: job.runID, url: hit.url, headers: hit.headers ?? [:], progress: progress)
         }
-        defer { if path != index.assets[assetId]?.path { discardTemporary(path) } }
+        var retainDownloadedFile = false
+        defer {
+            if path != index.assets[assetId]?.path && !retainDownloadedFile && !(Task.isCancelled && backend.hasCompletedTransfer(id: job.runID)) { discardTemporary(path) }
+        }
         try Task.checkCancellation()
         guard jobs.contains(where: { $0.id == job.id && $0.runID == job.runID && $0.status == .running }) else { return }
-        let ext = URL(fileURLWithPath: path).pathExtension.downloadNonEmpty ?? "m4a"
+        activity(for: job.entry)?.phase = .verifying
+        do { try await backend.verify(path: path, entry: job.entry, provider: hit.provider) }
+        catch {
+            if !NetworkQuality.shared.connected { retainDownloadedFile = backend.hasCompletedTransfer(id: job.runID) }
+            throw error
+        }
+        try Task.checkCancellation()
+        let ext = AudioDownloadContainer.fileExtension(at: path) ?? URL(fileURLWithPath: path).pathExtension.downloadNonEmpty ?? "m4a"
         let destination = folder.appendingPathComponent(assetId).appendingPathExtension(ext)
         defer { if index.assets[assetId] == nil { try? FileManager.default.removeItem(at: destination) } }
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         try FileManager.default.moveItem(atPath: path, toPath: destination.path)
+        DiskCache.allowLockedPlayback(destination)
         let hash = await Task.detached(priority: .utility) {
             _ = writeTrackTags(path: destination.path, title: job.entry.title, artist: job.entry.artist, album: job.entry.albumName ?? "", artwork: job.entry.artworkData ?? Data())
             return Self.hashFile(destination.path)
@@ -547,8 +632,9 @@ final class DownloadStore {
         guard let hash, let bytes = (try FileManager.default.attributesOfItem(atPath: destination.path)[.size]) as? NSNumber else { throw DownloadError("Incomplete asset") }
         let asset = Asset(id: assetId, path: destination.path, provider: hit.provider, recordingIdentity: identity, codec: codec,
                           kbps: hit.kbps ?? 0, lossless: hit.lossless ?? false, youtubeVideoId: hit.youtubeVideoId,
-                          bytes: bytes.int64Value, sha256: hash, entry: job.entry, managed: true, sampleRate: hit.sampleRate, bitDepth: hit.bitDepth, quality: job.quality)
+                          bytes: bytes.int64Value, sha256: hash, entry: job.entry, managed: true, sampleRate: hit.sampleRate, bitDepth: hit.bitDepth, quality: job.quality, recordingVerified: true)
         index.assets[assetId] = asset; finishJob(job, asset: asset); persist()
+        backend.finish(id: job.runID)
         LyricsTagBridge.shared.embedSidecar(audioPath: destination.path, videoId: hit.youtubeVideoId ?? job.entry.id,
             title: job.entry.title, artist: job.entry.artist, durationMs: Int64(job.entry.durationSeconds * 1000), album: job.entry.albumName,
             callback: EmbedSidecarAdapter { _, _ in })
@@ -566,23 +652,13 @@ final class DownloadStore {
         refreshDownloadedEntryKeys()
     }
     private func discardTemporary(_ path: String) { for path in [path, path + ".len", path + ".grow", path + ".complete"] { try? FileManager.default.removeItem(atPath: path) } }
-    private struct ResolvedDownload: Decodable {
+    struct ResolvedDownload: Codable {
         var url: String; var provider: String; var recordingIdentity: String?; var codec: String?; var mimeType: String?
         var kbps: Int?; var sampleRate: Int?; var bitDepth: Int?; var lossless: Bool?; var youtubeVideoId: String?; var headers: [String: String]?
     }
     private struct DownloadError: LocalizedError { let message: String; init(_ message: String) { self.message = message }; var errorDescription: String? { message } }
 }
 private extension String { var downloadNonEmpty: String? { isEmpty ? nil : self } }
-private final class ResolveAdapter: DownloadBridgeResolveCallback {
-    let handler: (String?, String?) -> Void
-    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
-    func onResult(json: String?, message: String?) { handler(json, message) }
-}
-private final class DoneAdapter: StreamDownloadBridgeDownloadCallback {
-    let handler: (String?, String?) -> Void
-    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
-    func onResult(path: String?, message: String?) { handler(path, message) }
-}
 private final class EmbedSidecarAdapter: LyricsTagBridgeEmbedCallback {
     let handler: (String?, String?) -> Void
     init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }

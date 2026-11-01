@@ -12,11 +12,13 @@ import AppKit
 
 // Loading a queue entry into the engine, including Dolby Atmos.
 extension PlaybackController {
-    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true, freshResolution: Bool = false) {
+    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true, freshResolution: Bool = false, reuseCurrentSource: Bool = false) {
         guard queue.indices.contains(index) else { return }
         startEngineIfNeeded()
         let engineStartupTask = self.engineStartupTask
         let entry = queue[index]
+        deferredNetworkRecovery = nil
+        let repeatedSource = reuseCurrentSource && current?.id == entry.id ? repeatableCurrentSource() : nil
         let requiresFreshResolution = freshResolution || (recoveryNeedsFreshResolution && current?.id == entry.id)
         if current?.id == entry.id, playingIndex == index, engineLoadedId == entry.id,
            state == .buffering || state == .playing {
@@ -48,6 +50,7 @@ extension PlaybackController {
         nextPreparationTask = nil
         playGeneration += 1
         let generation = playGeneration
+        Self.releaseObsoleteStreams(keeping: [entry.id])
         resumeGeneration &+= 1
         // A manual selection stops the outgoing voice at once: the listener
         // asked for a different song, not a few more seconds of this one.
@@ -120,9 +123,16 @@ extension PlaybackController {
                 // could send LoadTrack before the engine had an output stream;
                 // the UI then had lyrics and a playing state without audio.
                 try await engineStartupTask?.value
-                let outcome = try await Self.resolveSource(
-                    entry, prefs: prefs, freshResolution: requiresFreshResolution, latencyResolved: latencyRecorder
-                )
+                let outcome: ResolveOutcome
+                if let repeatedSource {
+                    outcome = ResolveOutcome(source: repeatedSource, leftover: nil)
+                    await latencyRecorder(ProcessInfo.processInfo.systemUptime, "cached", "repeat")
+                } else {
+                    let selected = try await Self.resolveSource(
+                        entry, prefs: prefs, freshResolution: requiresFreshResolution, latencyResolved: latencyRecorder
+                    )
+                    outcome = try await Self.bufferPreparedSource(selected, mediaId: entry.id)
+                }
                 let stillCurrent = await MainActor.run { [weak self] in
                     self?.playGeneration == generation
                 }

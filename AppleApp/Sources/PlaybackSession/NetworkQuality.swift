@@ -20,17 +20,20 @@ final class NetworkQuality {
     init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let expensive = path.isExpensive || path.isConstrained
-            let signature = "\(path.status)|" + path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            let signature = "\(path.status)|" + path.availableInterfaces.filter { path.usesInterfaceType($0.type) }
+                .map { "\($0.type):\($0.name)" }.sorted().joined(separator: ",")
             Task { @MainActor in
                 guard let self else { return }
+                let wasConnected = self.connected
                 self.metered = expensive; self.connected = path.status == .satisfied
+                StreamDownloadBridge.shared.networkStatus(available: self.connected)
                 AppSettings.shared.setMeteredConnection(value: KotlinBoolean(bool: expensive))
                 DownloadStore.shared.networkPolicyChanged()
                 if let previous = self.pathSignature, previous != signature {
                     self.pathChanges += 1
                     // Active streams drop requests on the old path and resume at
                     // their offsets, rather than waiting out a socket timeout.
-                    if path.status == .satisfied { StreamDownloadBridge.shared.networkChanged() }
+                    if self.connected && wasConnected { StreamDownloadBridge.shared.networkChanged() }
                 }
                 self.pathSignature = signature
             }

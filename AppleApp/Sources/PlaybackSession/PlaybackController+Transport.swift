@@ -186,6 +186,7 @@ extension PlaybackController {
     }
 
     func pausePlayback(releaseAudioSession: Bool = false) {
+        deferredNetworkRecovery = nil
         resumeGeneration &+= 1
         wasInterrupted = false
         let loading = state == .buffering
@@ -410,6 +411,9 @@ extension PlaybackController {
         position = seconds
         positionSampledAt = Date()
         VideoPlayback.shared.transportClockChanged()
+        // Seeking can abandon the mixer's armed incoming voice. Re-arm the
+        // already-local loop so the next EOS does not fall back to a cold load.
+        if repeatMode == .one { syncEngineQueueNext() }
     }
 
     func removeFromQueue(at offsets: IndexSet) {

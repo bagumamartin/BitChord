@@ -3,7 +3,7 @@
 set -euo pipefail
 app="${1:?Pass the path to a Debug macOS BitChord.app}"
 validation_dir="$(mktemp -d)"
-trap 'rm -rf "$validation_dir"' EXIT
+trap 'cp "$validation_dir/runtime.log" /tmp/bitchord-queue-runtime-last.log 2>/dev/null || true; rm -rf "$validation_dir"' EXIT
 validation_app="$validation_dir/BitChordQueueValidation.app"
 ditto "$app" "$validation_app"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.bitchord.BitChord.queuevalidation.run-$RANDOM-$RANDOM" "$validation_app/Contents/Info.plist"

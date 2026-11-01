@@ -52,6 +52,7 @@ extension PlaybackController {
         engineLoadedId = entry.id
         loadedSourcePath = info.source
         loadedSourceHeaders = headers
+        Self.releaseObsoleteStreams(keeping: Set([entry.id, nextEntry?.id].compactMap { $0 }))
         position = startAt
         positionSampledAt = Date()
         duration = info.durationSeconds
@@ -197,7 +198,7 @@ extension PlaybackController {
 
     /// Keeps the engine's pending-next pointing at the following queue entry
     /// so gapless/crossfade arming works (spec §3.1). Repeat-one without Automix
-    /// must not arm the next song — the current track seeks to 0 at EOS.
+    /// arms a gapless loop of the current file.
     /// Repeat-one *with* Automix arms a self-mix into the same track.
     func syncEngineQueueNext() {
         nextPreparationTask?.cancel()
@@ -212,6 +213,7 @@ extension PlaybackController {
         // Recommendation replies can arrive before the selected song has loaded.
         // Read-ahead starts after that load, using its authoritative audio path.
         guard engineLoadedId != nil, engineLoadedId == current?.id else { return }
+        Self.releaseObsoleteStreams(keeping: Set([current?.id, nextEntry?.id].compactMap { $0 }))
         queueNextRevision &+= 1
         let revision = queueNextRevision
         let gate = loadSubmissionGate
@@ -228,7 +230,30 @@ extension PlaybackController {
         // Upstream still measures the following track while a non-Automix
         // repeat-one loop runs, so leaving the loop is not a cold start.
         warmUpcoming(around: playingIndex, generation: generation)
-        if repeatMode == .one && !automixEnabled { return }
+        if repeatMode == .one && !automixEnabled {
+            // Queue the same local recording before EOS so background audio
+            // continues across the boundary without a new source lookup.
+            if let repeated = repeatableCurrentSource(), let entry = current {
+                let loop = TransitionPlanRec(
+                    style: .gapless, bassSwap: false, bassSwapFraction: 0.7,
+                    filterSweep: 0, vocalOverlap: 0, fadeSeconds: 0,
+                    transitionEndSeconds: 0, cueSeconds: 0, playbackRate: 1,
+                    bedFraction: 0, bedGainDb: 0, dipDepth: 0, dipWidth: 0,
+                    postGlideSeconds: 0, outgoingDurationSeconds: duration,
+                    reason: "repeat-one"
+                )
+                sourceHeadersByPath = [repeated.source: repeated.headers]
+                gate.submit(generation: generation, revision: revision) { [engine] in
+                    try? engine.queueNextIfCurrent(request: LoadRequest(
+                        source: repeated.source, title: entry.title, artist: entry.artist,
+                        startSeconds: 0, plan: loop, headers: repeated.headers,
+                        claimedKbps: UInt32(clamping: repeated.kbps), loudnessDb: repeated.loudnessDb,
+                        durationSeconds: repeated.durationSec.map(Double.init)
+                    ), expectedSource: expectedSource)
+                }
+            }
+            return
+        }
         guard let next = nextEntry else {
             return
         }
@@ -251,6 +276,7 @@ extension PlaybackController {
         let currentSource = loadedSourcePath ?? ""
         let outgoingDuration = duration > 0 ? duration : (current?.durationSeconds ?? 0)
         let currentSourceHeaders = loadedSourceHeaders
+        let repeatedSource = selfMix ? repeatableCurrentSource() : nil
         let currentText = current?.itemText ?? ""
         let nextText = next.itemText
         // A self-mix is never an album gapless splice — force a real blend.
@@ -268,7 +294,12 @@ extension PlaybackController {
         )
         nextPreparationTask = Task.detached(priority: .userInitiated) {
             do {
-                let selection = try await Self.resolveSource(next, prefs: prefs, preparationBudget: preparationBudget)
+                let selection: ResolveOutcome
+                if let repeatedSource {
+                    selection = ResolveOutcome(source: repeatedSource, leftover: nil)
+                } else {
+                    selection = try await Self.resolveSource(next, prefs: prefs, preparationBudget: preparationBudget)
+                }
                 try Task.checkCancellation()
                 let outcome = try await Self.bufferPreparedSource(selection, mediaId: nextId)
                 let stillCurrent = await MainActor.run { [weak self] in

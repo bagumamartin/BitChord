@@ -148,7 +148,7 @@ enum SourceSubstitution {
         isExplicit: KotlinBoolean? = nil,
         quality: String
     ) async -> Stream? {
-        return await call { callback in
+        return await call(cancellable: true) { callback in
             SourceResolverBridge.shared.forDownload(
                 title: title,
                 artist: artist,
@@ -199,11 +199,14 @@ enum SourceSubstitution {
 
     private static func call(
         diagnostic: @escaping @Sendable (String) -> Void = { _ in },
+        cancellable: Bool = false,
         _ request: (SourceResolverBridgeStreamCallback) -> Void
     ) async -> Stream? {
         let box = ResumeOnce()
-        return await withCheckedContinuation { continuation in
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
             box.arm(continuation)
+            if cancellable && Task.isCancelled { box.resume(nil); return }
             request(ResolveCallback { json, message in
                 if let message { diagnostic(message) }
                 // A null document is a *miss*, not a failure: this source does not
@@ -212,6 +215,9 @@ enum SourceSubstitution {
                 // same either way — fall back to YouTube.
                 box.resume(json.flatMap(decode))
             })
+            }
+        } onCancel: {
+            if cancellable { box.resume(nil) }
         }
     }
 

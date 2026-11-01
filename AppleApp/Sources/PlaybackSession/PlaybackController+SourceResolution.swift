@@ -95,10 +95,26 @@ extension PlaybackController {
     ) async throws -> ResolveOutcome {
         await DownloadStore.shared.waitUntilReady()
         try Task.checkCancellation()
-        if let asset = DownloadStore.shared.asset(for: entry) {
+        let pinnedOriginal = entry.source.hasPrefix("yt:") && OriginalVersion.shared.isPinned(videoId: entry.id)
+        if let asset = await DownloadStore.shared.playbackAsset(for: entry, onlyOriginal: pinnedOriginal) {
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "download")
             return ResolveOutcome(source: ResolvedSource(source: asset.path, headers: [:], kbps: asset.kbps,
                 lossless: asset.lossless, codec: asset.codec, origin: .local, youtubeVideoId: asset.youtubeVideoId), leftover: nil)
+        }
+        if !freshResolution, !entry.isLocal,
+           let cached = await StreamFileCache.shared.path(for: entry.id, allowQualityFallback: true,
+                onlyOriginal: entry.source.hasPrefix("yt:") && OriginalVersion.shared.isPinned(videoId: entry.id)) {
+            let metadata = await StreamFileCache.shared.metadata(at: cached)
+            let musicOnlyVideo = prefs.preferMusicOnly && entry.isVideo && !OriginalVersion.shared.isPinned(videoId: entry.id)
+            if (!musicOnlyVideo || (metadata?.playbackMediaId == entry.id && metadata?.recordingVerified == true)),
+               let verified = NativeStreamVerifier.verifyCachedFile(cached) {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
+            return ResolveOutcome(source: ResolvedSource(source: cached, headers: [:],
+                kbps: verified.estimatedKbps.map(Int.init) ?? metadata?.kbps ?? 0,
+                lossless: verified.format.losslessPcm, codec: verified.format.codec,
+                durationSec: metadata?.durationSeconds, loudnessDb: metadata?.relativeLoudnessDb,
+                clientName: "cache", origin: .cache, youtubeVideoId: metadata?.youtubeVideoId), leftover: nil)
+            }
         }
         if entry.source.hasPrefix("saavn:") || entry.id.hasPrefix("saavn:") {
             let id = entry.source.hasPrefix("saavn:") ? String(entry.source.dropFirst(6)) : String(entry.id.dropFirst(6))
@@ -164,7 +180,7 @@ extension PlaybackController {
             )
         }
         let videoId = String(entry.source.dropFirst(3))
-        if !freshResolution, !(prefs.wantLossless && prefs.canSubstitute),
+        if !freshResolution, !(prefs.preferMusicOnly && entry.isVideo && !OriginalVersion.shared.isPinned(videoId: videoId)),
            let growing = streamGate.lock.withLock({ streamGate.growing[videoId] }),
            FileManager.default.fileExists(atPath: growing),
            !FileManager.default.fileExists(atPath: growing + ".failed"),
@@ -182,24 +198,12 @@ extension PlaybackController {
         // exact thing they rejected. This has to be checked *before* the lookup
         // rather than after it, or a revert still costs a network round trip to
         // arrive at the answer it already knew.
+        guard await NetworkQuality.shared.connected else { throw URLError(.notConnectedToInternet) }
         if OriginalVersion.shared.isPinned(videoId: videoId) {
             let source = try await Self.resolveYouTube(videoId: videoId, prefs: prefs)
             await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
                                    "cold", source.clientName ?? "unknown")
             return ResolveOutcome(source: source, leftover: nil)
-        }
-        if !freshResolution, let cached = await StreamFileCache.shared.path(for: videoId, maxKbps: prefs.maxKbps, requireLossless: prefs.wantLossless),
-           let verified = NativeStreamVerifier.verifyCachedFile(cached),
-           !prefs.wantLossless || verified.format.losslessPcm || !prefs.canSubstitute {
-            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
-            let metadata = await StreamFileCache.shared.metadata(at: cached)
-            let cachedDuration = metadata?.durationSeconds
-            return ResolveOutcome(
-                source: ResolvedSource(
-                    source: cached, headers: [:], kbps: verified.estimatedKbps.map(Int.init) ?? metadata?.kbps ?? 0, lossless: verified.format.losslessPcm, codec: verified.format.codec, durationSec: cachedDuration, loudnessDb: metadata?.relativeLoudnessDb, clientName: "cache", origin: .cache, youtubeVideoId: metadata?.youtubeVideoId ?? videoId
-                ),
-                leftover: nil
-            )
         }
         return try await resolveWithModulePriority(
             entry, videoId: videoId, prefs: prefs, preparationBudget: preparationBudget, latencyResolved: latencyResolved
@@ -207,10 +211,8 @@ extension PlaybackController {
     }
 
     /// Upstream `resolveWithModulePriority`: start YouTube and substitutes
-    /// together. Lossless gives configured sources up to three seconds to answer
-    /// before a ready YouTube fallback is selected. A lookup that loses is **not** cancelled — it is handed
-    /// to QualityUpgrade as `inFlight`. Preparing the next track may spend a
-    /// larger budget while the current track is still playing.
+    /// together. The selected upload starts without waiting for a catalogue
+    /// search. The preferred lookup is retained for an audio-verified upgrade.
     private static func resolveWithModulePriority(
         _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
         preparationBudget: TimeInterval?,
@@ -246,9 +248,8 @@ extension PlaybackController {
         // happens before anything starts, so the video never plays first.
         if prefs.preferMusicOnly, entry.isVideo {
             if let stream = await lookup.value {
-                fallback.cancel()
-                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
-                return ResolveOutcome(
+                _ = try await fallback.value
+                let selected = ResolveOutcome(
                     source: ResolvedSource(
                         source: stream.url, headers: stream.headers,
                         kbps: stream.format.kbps ?? 0,
@@ -258,6 +259,15 @@ extension PlaybackController {
                     ),
                     leftover: nil
                 )
+                let buffered = try await bufferPreparedSource(selected, mediaId: entry.id)
+                if buffered.source.source.hasPrefix("/"),
+                   await RecordingIdentityVerifier.matches(videoId: videoId, candidate: buffered.source.source, allowTimingEdits: true) {
+                    await StreamFileCache.shared.markRecordingVerified(mediaID: entry.id,
+                        cacheKey: "\(entry.id)#prepared-\(DiskCache.hashName(stream.url))", sourcePath: buffered.source.source)
+                    await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "verified source substitute")
+                    return buffered
+                }
+                PlaybackDebugLog.shared.record("music-only candidate rejected: recording identity could not be verified", about: videoId)
             }
             let source = try await fallback.value
             await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
@@ -266,25 +276,19 @@ extension PlaybackController {
                 ? "A preferred source supplied verified lossless audio." : report.explanation)
         }
 
-        let preferLossless = prefs.wantLossless && prefs.canSubstitute
-        let race = PlaybackSourceRace<QualityUpgrade.Candidate, ResolvedSource>(preferPrimary: preferLossless)
+        let race = PlaybackSourceRace<QualityUpgrade.Candidate, ResolvedSource>(preferPrimary: false)
         _ = Task { await race.finishLookup(await lookup.value) }
         _ = Task { await race.finishFallback(try? await fallback.value) }
 
-        let waitSeconds = preferLossless ? (preparationBudget ?? 3) : 0.8
+        let waitSeconds = 0.0
         switch await race.wait(timeoutNanoseconds: UInt64(waitSeconds * 1_000_000_000)) {
         case .preferred(let stream):
-            fallback.cancel()
-            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
-            let source = ResolvedSource(
-                source: stream.url, headers: stream.headers,
-                kbps: stream.format.kbps ?? 0,
-                lossless: stream.format.lossless, codec: stream.format.codec,
-                durationSec: stream.durationSec,
-                origin: .substitute
-            )
-            return ResolveOutcome(source: source, leftover: nil, decisionNote: source.lossless
-                ? "A preferred source supplied verified lossless audio." : report.explanation)
+            // Metadata identifies a candidate, not its audio. The selected
+            // upload remains the reference while the upgrade path verifies it.
+            let source = try await fallback.value
+            await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime, "cold", source.clientName ?? "YouTube")
+            return ResolveOutcome(source: source, leftover: Task { stream },
+                decisionNote: "A preferred copy is waiting for recording verification.")
         case .fallback(let source):
             // Preserve the slower substitute lookup for the in-playback quality
             // upgrade path instead of making it delay the first audible sample.
@@ -294,9 +298,8 @@ extension PlaybackController {
                 ? "Preferred sources did not provide a verified stream before the playback deadline."
                 : "YouTube is the selected source."))
         case .timedOut:
-            // A substitute lookup gets a short head start, then the direct
-            // YouTube URL carries first sound while the lookup stays available
-            // to the existing in-playback quality-upgrade path.
+            // The selected YouTube upload carries first sound; the patient
+            // lookup stays available to the verified quality-upgrade path.
             do {
                 let source = try await fallback.value
                 await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
@@ -341,16 +344,7 @@ extension PlaybackController {
         _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
         lookup: Task<QualityUpgrade.Candidate?, Never>, error: Error
     ) async throws -> ResolvedSource {
-        if let stream = await lookup.value {
-            PlaybackDebugLog.shared.record("YouTube refused; playing the same recording from another catalogue", about: videoId)
-            return ResolvedSource(
-                source: stream.url, headers: stream.headers,
-                kbps: stream.format.kbps ?? 0,
-                lossless: stream.format.lossless, codec: stream.format.codec,
-                durationSec: stream.durationSec,
-                origin: .substitute
-            )
-        }
+        if let stream = await lookup.value { QualityUpgrade.shelve(videoId, stream: stream) }
         // The counterpart is another YouTube ask, which a bot check refuses too.
         if !InnertubeStreamResolver.StreamError.isBotCheck(error),
            let twin = await counterpart(of: entry, videoId: videoId) {
@@ -533,8 +527,8 @@ extension PlaybackController {
     /// not be made correct without the parts that are judgement, which now live in
     /// the shared module's `SourceResolver`:
     ///
-    ///  - The track is matched by `TrackMatcher` before anything is opened, so a
-    ///    cover cannot be substituted for the recording the listener picked.
+    ///  - `TrackMatcher` checks catalogue metadata before opening a candidate.
+    ///    The playback/download boundaries also verify decoded audio identity.
     ///  - Rank decides who is asked. Lossless compares completed answers within
     ///    a bounded window instead of selecting only the first responder.
     ///  - `playingDurationSec` set routes this through the *upgrade* path, whose bar
@@ -631,6 +625,10 @@ extension PlaybackController {
     /// not request media bytes; the opening range remains coupled to playback.
     func warmUpcoming(around index: Int, generation: UInt64) {
         guard state == .playing || state == .buffering || state == .paused else { return }
+        guard NetworkQuality.shared.connected, repeatMode != .one else {
+            urlPrefetchTask?.cancel(); urlPrefetchFingerprint = nil
+            return
+        }
         // Repeat-one never arms a different next track into the engine, but the
         // song after the loop still has to be measured while the loop runs —
         // otherwise turning repeat off starts a cold whole-track decode with
@@ -661,10 +659,11 @@ extension PlaybackController {
                     // A path change can happen while this sequential read-ahead
                     // is running. Keep the first queued item, but stop before
                     // resolving additional speculative URLs on a metered path.
-                    return !NetworkQuality.shared.metered || id == prefetch.first?.id
+                    return NetworkQuality.shared.connected && (!NetworkQuality.shared.metered || id == prefetch.first?.id)
                 }
                 guard stillQueued else { continue }
                 let videoId = String(entry.source.dropFirst(3))
+                if await StreamFileCache.shared.path(for: videoId, allowQualityFallback: true) != nil { continue }
                 _ = try? await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
             }
         }
@@ -679,16 +678,48 @@ extension PlaybackController {
 
     private final class StreamGate: @unchecked Sendable {
         let lock = NSLock()
-        var tasks: [String: Task<String, Error>] = [:]
+        var tasks: [String: (id: UUID, task: Task<String, Error>)] = [:]
         /// Path of a download that has its first bytes, set before the
         /// downloader's continuation resumes so a second resolve cannot miss it.
         var growing: [String: String] = [:]
         var growingQuality: [String: String] = [:]
         var growingKbps: [String: Int] = [:]
         var durations: [String: Int] = [:]
+        var requests: [String: (mediaID: String, path: String?)] = [:]
+        var retired: [String: String] = [:]
+        var keepingMediaIDs: Set<String> = []
+        var verificationPins: [String: Int] = [:]
     }
 
     private static let streamGate = StreamGate()
+
+    static func retainVerificationStream(_ mediaID: String) {
+        streamGate.lock.withLock { streamGate.verificationPins[mediaID, default: 0] += 1 }
+    }
+    static func releaseVerificationStream(_ mediaID: String) {
+        streamGate.lock.withLock {
+            let remaining = (streamGate.verificationPins[mediaID] ?? 1) - 1
+            streamGate.verificationPins[mediaID] = remaining > 0 ? remaining : nil
+        }
+        releaseObsoleteStreams()
+    }
+
+    static func releaseObsoleteStreams(keeping selected: Set<String>? = nil) {
+        let (mediaIDs, requests, retired) = streamGate.lock.withLock {
+            if let selected { streamGate.keepingMediaIDs = selected }
+            return (streamGate.keepingMediaIDs.union(streamGate.verificationPins.keys), streamGate.requests, streamGate.retired)
+        }
+        for (requestID, request) in requests {
+            let base = String(request.mediaID.prefix(while: { $0 != "#" }))
+            if !mediaIDs.contains(base), request.path.map({ sourceHasPlaybackReaders(source: $0) }) != true {
+                StreamDownloadBridge.shared.cancel(downloadId: requestID)
+            }
+        }
+        for (path, mediaID) in retired where !mediaIDs.contains(mediaID) && !sourceHasPlaybackReaders(source: path) {
+            for suffix in ["", ".grow", ".len", ".complete", ".failed", ".playback-cancelled"] { try? FileManager.default.removeItem(atPath: path + suffix) }
+            streamGate.lock.withLock { streamGate.retired[path] = nil }
+        }
+    }
 
     /// Starts playback as soon as the first range is on disk — up to a megabyte,
     /// or half that for a client that caps lower. Remaining ranges keep
@@ -698,21 +729,22 @@ extension PlaybackController {
         videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max), expectedMimeType: String? = nil, firstRangeRetry: Int = 0
     ) async throws -> String {
         let taskKey = videoId + "|" + StreamFileCache.qualityIdentity + "|" + DiskCache.hashName(url)
-        let task: Task<String, Error> = streamGate.lock.withLock {
+        let flight: (id: UUID, task: Task<String, Error>) = streamGate.lock.withLock {
             if let existing = streamGate.tasks[taskKey] { return existing }
             let created = Task { try await streamViaKtorOnce(videoId: videoId, url: url, headers: headers, codec: codec, kbps: kbps, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, maxKbps: maxKbps, expectedMimeType: expectedMimeType, firstRangeRetry: firstRangeRetry) }
-            streamGate.tasks[taskKey] = created
-            return created
+            let flight = (id: UUID(), task: created)
+            streamGate.tasks[taskKey] = flight
+            return flight
         }
         do {
-            let path = try await task.value
+            let path = try await flight.task.value
             streamGate.lock.withLock {
-                if streamGate.tasks[taskKey] != nil { streamGate.tasks[taskKey] = nil }
+                if streamGate.tasks[taskKey]?.id == flight.id { streamGate.tasks[taskKey] = nil }
             }
             return path
         } catch {
             streamGate.lock.withLock {
-                if streamGate.tasks[taskKey] != nil { streamGate.tasks[taskKey] = nil }
+                if streamGate.tasks[taskKey]?.id == flight.id { streamGate.tasks[taskKey] = nil }
             }
             throw error
         }
@@ -722,24 +754,33 @@ extension PlaybackController {
         videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max), expectedMimeType: String? = nil, firstRangeRetry: Int = 0
     ) async throws -> String {
         let qualityIdentity = StreamFileCache.qualityIdentity
+        let requestID = "playback:" + UUID().uuidString
+        streamGate.lock.withLock { streamGate.requests[requestID] = (videoId, nil) }
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             let lock = NSLock()
             var resumed = false
+            var openedPath: String?
             let ready = DownloadCallbackAdapter { path, message in
                 lock.lock()
                 defer { lock.unlock() }
                 guard !resumed else { return }
                 resumed = true
                 if let path {
+                    openedPath = path
+                    DiskCache.allowLockedPlayback(URL(fileURLWithPath: path))
+                    streamGate.lock.withLock { streamGate.requests[requestID]?.path = path }
                     streamGate.lock.withLock { streamGate.growing[videoId] = path; streamGate.growingQuality[videoId] = qualityIdentity; streamGate.growingKbps[videoId] = kbps }
-                    Task { await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
-                    continuation.resume(returning: path)
+                    Task {
+                        await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds)
+                        continuation.resume(returning: path)
+                    }
                 } else {
                     continuation.resume(throwing: InnertubeStreamResolver.StreamError(
                         message: message ?? "Stream failed"))
                 }
             }
             let done = DownloadCallbackAdapter { path, message in
+                streamGate.lock.withLock { streamGate.requests[requestID] = nil }
                 // The bridge reports a failure before the first byte — a refused
                 // or invalid opening range, a download with no bytes — on `done`
                 // alone and never calls `ready`. Unanswered, the continuation
@@ -748,6 +789,7 @@ extension PlaybackController {
                 // what lets the caller's re-resolve on a rejected range run.
                 lock.lock()
                 let waiting = !resumed
+                let failedPath = openedPath
                 resumed = true
                 lock.unlock()
                 if waiting, path == nil {
@@ -757,24 +799,37 @@ extension PlaybackController {
                 }
                 if waiting, let path { continuation.resume(returning: path) }
                 if let path {
-                    Task { await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
+                    Task {
+                        await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds)
+                        streamGate.lock.withLock {
+                            if streamGate.growing[videoId] == path { streamGate.growing[videoId] = nil; streamGate.growingQuality[videoId] = nil; streamGate.growingKbps[videoId] = nil; streamGate.durations[videoId] = nil }
+                            streamGate.retired[path] = String(videoId.prefix(while: { $0 != "#" }))
+                        }
+                        releaseObsoleteStreams()
+                    }
                 } else if let message {
                     print("[Playback] stream tail failed for \(videoId): \(message)")
-                    streamGate.lock.withLock { streamGate.growing[videoId] = nil }
-                    Task { await StreamFileCache.shared.dropGrowing(videoId: videoId) }
+                    if let failedPath {
+                        streamGate.lock.withLock {
+                            if streamGate.growing[videoId] == failedPath { streamGate.growing[videoId] = nil; streamGate.growingQuality[videoId] = nil; streamGate.growingKbps[videoId] = nil; streamGate.durations[videoId] = nil }
+                            streamGate.retired[failedPath] = String(videoId.prefix(while: { $0 != "#" }))
+                        }
+                        Task { await StreamFileCache.shared.dropGrowing(videoId: videoId, path: failedPath) }
+                        releaseObsoleteStreams()
+                    }
                 }
             }
             // With the YouTube id the bridge can answer a mid-track refusal with a
             // fresh URL for the same rendition instead of cutting the song short.
             if let youtubeVideoId {
-                StreamDownloadBridge.shared.streamTrackToFile(
-                    videoId: youtubeVideoId, maxKbps: Int32(clamping: maxKbps),
+                StreamDownloadBridge.shared.streamTrackRequest(
+                    requestId: requestID, videoId: youtubeVideoId, maxKbps: Int32(clamping: maxKbps),
                     url: url, headers: headers, expectedMimeType: expectedMimeType,
                     firstRangeRetry: Int32(clamping: firstRangeRetry),
                     ready: ready, done: done)
                 return
             }
-            StreamDownloadBridge.shared.streamToFile(url: url, headers: headers, ready: ready, done: done)
+            StreamDownloadBridge.shared.streamSourceRequest(requestId: requestID, url: url, headers: headers, ready: ready, done: done)
         }
     }
 }

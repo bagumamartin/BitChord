@@ -243,6 +243,8 @@ final class PlaybackController {
     /// Tracks stepped over in a row; bounded so a dead network does not walk
     /// the whole queue.
     var automaticSkips = 0
+    var deferredNetworkRecovery: (entryID: String, position: Double, generation: UInt64)?
+    var streamRecoveryPathChanges = 0
     /// Recommendations that have had their one Automix ordering pass.
     var settledAutoplayIds: Set<String> = []
     /// The selection whose load is in flight, cleared once it lands or fails.

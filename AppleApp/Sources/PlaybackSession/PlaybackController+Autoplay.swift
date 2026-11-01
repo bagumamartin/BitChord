@@ -18,6 +18,7 @@ extension PlaybackController {
     /// because the next fill is seeded from whatever is playing then. It never
     /// rewrites the fill already shown.
     func maybeAutoplay(force: Bool = false, lowWaterRefill: Bool = false) {
+        guard NetworkQuality.shared.connected else { return }
         if force {
             // A forced fill tops the tail up to its target; it does not replace it.
             guard PlaybackQueuePolicy.fillRoom(queue, after: playingIndex) > 0 else { return }

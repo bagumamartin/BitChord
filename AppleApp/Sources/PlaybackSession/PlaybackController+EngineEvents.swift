@@ -213,7 +213,20 @@ extension PlaybackController {
         dolbyRenderer?.stop()
         dolbyRenderer = nil
         engineLoadedId = nil
-        loadCurrent(index, refreshAutoplay: false)
+        loadCurrent(index, refreshAutoplay: false, reuseCurrentSource: true)
+    }
+
+    /// Reuse the selected recording rather than resolving a new rendition at EOS.
+    func repeatableCurrentSource() -> ResolvedSource? {
+        guard let source = loadedSourcePath, source.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: source),
+              !FileManager.default.fileExists(atPath: source + ".failed"),
+              !FileManager.default.fileExists(atPath: source + ".playback-cancelled") else { return nil }
+        return ResolvedSource(source: source, headers: loadedSourceHeaders,
+            kbps: Int(nerd?.kbps ?? 0), lossless: QualityUpgrade.Format.isLosslessCodec(nerd?.codec), codec: nerd?.codec,
+            durationSec: duration > 0 ? Int(duration.rounded()) : nil,
+            loudnessDb: currentLoudnessDb, origin: resolvedOrigin[current?.id ?? ""] ?? .cache,
+            youtubeVideoId: historyVideoID)
     }
 
     func handleDuration(_ seconds: Double) {
@@ -268,6 +281,7 @@ extension PlaybackController {
     /// against it.
     @discardableResult
     func markUnplayable(_ entry: QueueEntry, after error: Error) -> Bool {
+        guard NetworkQuality.shared.connected else { return false }
         let nsError = error as NSError
         let message = error.localizedDescription
         guard nsError.domain != NSURLErrorDomain,

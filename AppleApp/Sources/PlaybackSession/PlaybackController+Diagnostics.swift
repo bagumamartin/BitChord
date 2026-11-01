@@ -567,6 +567,33 @@ extension PlaybackController {
         await settle()
         checks["disabled_autoplay_rejects_reply"] = !queue.contains { $0.id == "disabled001" }
         recommendationFetchOverride = nil
+        // Exercise actual mixer handoffs: repeat stays in the output lane,
+        // without tearing down/reloading the engine at the end of each lap.
+        autoplayEnabled = false
+        repeatMode = .one
+        setAutomixEnabled(false)
+        play([entry], context: "Repeat validation", contextID: "repeat-validation")
+        for _ in 0..<100 { if isPlaying && engineLoadedId == entry.id { break }; try? await Task.sleep(for: .milliseconds(50)) }
+        let loopGeneration = playGeneration
+        try? engine.setCrossfadeWindow(seconds: 0)
+        for lap in 1...2 {
+            seek(to: 19)
+            for _ in 0..<40 { if engine.positionSeconds() >= 18 { break }; try? await Task.sleep(for: .milliseconds(20)) }
+            for _ in 0..<80 { if engine.positionSeconds() < 2 && isPlaying { break }; try? await Task.sleep(for: .milliseconds(50)) }
+            checks["repeat_lap_\(lap)_retains_output_and_selection"] = isPlaying && engine.positionSeconds() < 2
+                && playGeneration == loopGeneration && current?.id == entry.id && playingIndex == 0
+            print("repeat validation lap \(lap): state=\(state) position=\(engine.positionSeconds()) generation=\(playGeneration)/\(loopGeneration) repeat=\(repeatMode) loaded=\(engineLoadedId ?? "nil")")
+        }
+        // A late/unarmed EOS still reopens the already-local recording.
+        nextPreparationTask?.cancel()
+        queueNextRevision &+= 1
+        loadSubmissionGate.setQueueRevision(queueNextRevision)
+        try? engine.queueNextIfCurrent(request: LoadRequest(source: "", title: "", artist: "", startSeconds: 0,
+            plan: nil, headers: [:], claimedKbps: 0, loudnessDb: nil, durationSeconds: nil), expectedSource: path.path)
+        handleTrackEnded(.natural, source: path.path)
+        for _ in 0..<100 { if isPlaying && engineLoadedId == entry.id && playGeneration > loopGeneration { break }; try? await Task.sleep(for: .milliseconds(50)) }
+        checks["repeat_unarmed_end_reuses_local_recording"] = isPlaying && loadedSourcePath == path.path && lastError == nil
+        repeatMode = .off
         sequencingTask?.cancel()
         try? engine.stop()
         let result: [String: Any] = ["checks": checks, "passed": checks.values.allSatisfy { $0 }]
