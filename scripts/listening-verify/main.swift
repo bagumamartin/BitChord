@@ -76,6 +76,21 @@ func withStore(_ body: (ListeningStore) -> Void) {
 
 print("listening store")
 
+withStore { _ in
+    let folder = ListeningStore.folderOverride!
+    var track = ListeningStore.Track(id: "cached", title: "Older title", artist: "Artist", album: nil,
+        albumId: nil, artistId: nil, art: "https://art.invalid/old", ms: 1, plays: 1, last: 100)
+    let older = ListeningStore.StoredBucket(month: "2026-01", tracks: [track])
+    track.title = "Current title"; track.art = "https://art.invalid/current"; track.last = 200
+    let newer = ListeningStore.StoredBucket(month: "2026-02", tracks: [track])
+    let first = folder.appendingPathComponent("2026-01.json"), second = folder.appendingPathComponent("2026-02.json")
+    let firstBytes = try! JSONEncoder().encode(older), secondBytes = try! JSONEncoder().encode(newer)
+    try! firstBytes.write(to: first); try! secondBytes.write(to: second)
+    let snapshot = ListeningStore.savedTrackMetadata()
+    check("offline artwork migration reads the latest saved track metadata", snapshot["cached"]?.title == track.title && snapshot["cached"]?.art == track.art)
+    check("background metadata snapshot leaves listening files unchanged", (try! Data(contentsOf: first)) == firstBytes && (try! Data(contentsOf: second)) == secondBytes)
+}
+
 // A week that begins in March and ends in April: Monday 30 March 2026 through
 // Thursday 2 April 2026.
 let thursday = day(2026, 4, 2)

@@ -566,6 +566,19 @@ final class ListeningStore {
     /// Names for the playback cache, which stores audio and a hash rather than
     /// titles. The newest play wins, because a track's name can be corrected and
     /// the cache is keyed by the audio, not by the name in force when it landed.
+    /// A read-only snapshot for background cache migration. It must not call
+    /// persist() or touch the live playback counters from a background executor.
+    static func savedTrackMetadata() -> [String: Track] {
+        var out: [String: Track] = [:]
+        for key in monthFiles() {
+            for track in readMonth(key)?.tracks ?? [] {
+                if let previous = out[track.id], (previous.last ?? 0) > (track.last ?? 0) { continue }
+                out[track.id] = track
+            }
+        }
+        return out
+    }
+
     func trackMetadata() -> [String: Track] {
         persist()
         var out: [String: Track] = [:]

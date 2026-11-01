@@ -162,7 +162,24 @@ struct BitChordApp: App {
                         }
                         LocalLibrary.shared.restore()
                         DownloadStore.shared.refresh()
-                        Task { await StreamFileCache.shared.trim() }
+                        Task.detached(priority: .utility) {
+                            let cache = StreamFileCache.shared
+                            await cache.trim()
+                            let pending = await cache.entries().filter { $0.entry == nil || $0.artworkReference == nil }
+                            guard !pending.isEmpty else { return }
+                            let names = pending.contains(where: { $0.entry == nil }) ? ListeningStore.savedTrackMetadata() : [:]
+                            for item in pending {
+                                guard !Task.isCancelled else { return }
+                                let entry: QueueEntry?
+                                if let saved = item.entry { entry = saved }
+                                else if let track = names[item.videoId] {
+                                    let source = item.videoId.hasPrefix("src:") || item.videoId.hasPrefix("saavn:") ? item.videoId : "yt:" + item.videoId
+                                    entry = QueueEntry(id: item.videoId, title: track.title, artist: track.artist,
+                                        source: source, thumbnailUrl: track.art, albumName: track.album, isLocal: false)
+                                } else { entry = nil }
+                                if let entry { await cache.remember(entry, allowNetwork: false) }
+                            }
+                        }
                         let token = PlatformSettings.shared.getSecret(key: "discord_token") ?? ""
                         if !token.isEmpty { DiscordGateway.shared.connect(token: token) }
                     }

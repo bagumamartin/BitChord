@@ -114,8 +114,12 @@ extension PlaybackController {
         guard let raw = entry.thumbnailUrl ?? local, !raw.isEmpty else { return }
         let sized = SharedArtwork.sized(raw, 544) ?? raw
         let headers = WebDavBridge.shared.playbackHeaders(fileUrl: sized)
+        let sourcePath = loadedSourcePath
         Task {
-            guard let data = await ArtworkRequests.shared.data(url: sized, headers: headers), !data.isEmpty else { return }
+            var saved: Data?
+            if let sourcePath { saved = await OfflineArtworkStore.shared.data(audioPath: sourcePath) }
+            if saved == nil { saved = await ArtworkRequests.shared.data(url: sized, headers: headers) }
+            guard let data = saved, !data.isEmpty else { return }
             var covered = entry; covered.artworkData = data
             if !entry.isLocal { await StreamFileCache.shared.remember(covered) }
             if let asset = DownloadStore.shared.asset(for: entry), asset.managed {
