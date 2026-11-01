@@ -92,6 +92,7 @@ final class DownloadStore {
     private let backend: any DownloadBackend
     private let workersEnabled: Bool
     private var verified: [String: Date] = [:]
+    private var artworkBackfills: [String: Task<Void, Never>] = [:]
     var activeCount: Int { jobs.filter { $0.status == .queued || $0.status == .running }.count }
     var collections: [Owner] { index.owners.values.filter { $0.browseId != nil && $0.accountId == accountId }.sorted { $0.title < $1.title } }
     var folder: URL { directory.appendingPathComponent("audio", isDirectory: true) }
@@ -319,6 +320,15 @@ final class DownloadStore {
         guard !restoring else { return }
         refreshDownloadedEntryKeys()
         let assets = Array(index.assets.values)
+        // Repair older downloads from local image bytes first. Failed requests
+        // never block audio publication, and subsequent playback can retry online.
+        for asset in assets where asset.managed && artworkBackfills[asset.id] == nil && !FileManager.default.fileExists(atPath: OfflineArtworkStore.coverURL(audioPath: asset.path).path) {
+            artworkBackfills[asset.id] = Task(priority: .utility) { [weak self] in
+                await OfflineArtwork.preserve(asset.entry, audioPath: asset.path, allowNetwork: false)
+                self?.artworkBackfills[asset.id] = nil
+                if FileManager.default.fileExists(atPath: OfflineArtworkStore.coverURL(audioPath: asset.path).path) { self?.refresh() }
+            }
+        }
         let id = UUID(); refreshID = id
         refreshTask?.cancel()
         let work = Task.detached(priority: .utility) {
@@ -493,6 +503,8 @@ final class DownloadStore {
             if asset.managed || index.pendingDeletes?.contains(asset.id) == true {
                 do {
                     if FileManager.default.fileExists(atPath: asset.path) { try FileManager.default.removeItem(atPath: asset.path) }
+                    OfflineArtworkStore.remove(audioPath: asset.path)
+                    artworkBackfills.removeValue(forKey: asset.id)?.cancel()
                 } catch { PlaybackDebugLog.shared.record("private download deletion deferred: \(error)"); continue }
                 try? FileManager.default.removeItem(atPath: URL(fileURLWithPath: asset.path).deletingPathExtension().appendingPathExtension("lrc").path)
             }
@@ -617,22 +629,33 @@ final class DownloadStore {
             throw error
         }
         try Task.checkCancellation()
+        let artwork = await backend.artwork(for: job.entry)
+        try Task.checkCancellation()
+        guard jobs.contains(where: { $0.id == job.id && $0.runID == job.runID && $0.status == .running }) else { return }
         let ext = AudioDownloadContainer.fileExtension(at: path) ?? URL(fileURLWithPath: path).pathExtension.downloadNonEmpty ?? "m4a"
         let destination = folder.appendingPathComponent(assetId).appendingPathExtension(ext)
-        defer { if index.assets[assetId] == nil { try? FileManager.default.removeItem(at: destination) } }
+        defer { if index.assets[assetId] == nil { try? FileManager.default.removeItem(at: destination); OfflineArtworkStore.remove(audioPath: destination.path) } }
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         try FileManager.default.moveItem(atPath: path, toPath: destination.path)
         DiskCache.allowLockedPlayback(destination)
         let hash = await Task.detached(priority: .utility) {
-            _ = writeTrackTags(path: destination.path, title: job.entry.title, artist: job.entry.artist, album: job.entry.albumName ?? "", artwork: job.entry.artworkData ?? Data())
+            _ = writeTrackTags(path: destination.path, title: job.entry.title, artist: job.entry.artist, album: job.entry.albumName ?? "", artwork: artwork.flatMap(OfflineArtworkStore.normalized) ?? Data())
             return Self.hashFile(destination.path)
         }.value
         try Task.checkCancellation()
         guard jobs.contains(where: { $0.id == job.id && $0.runID == job.runID && $0.status == .running }) else { return }
         guard let hash, let bytes = (try FileManager.default.attributesOfItem(atPath: destination.path)[.size]) as? NSNumber else { throw DownloadError("Incomplete asset") }
+        if let artwork {
+            let url = job.entry.thumbnailUrl ?? "embedded:\(job.entry.source)|\(job.entry.id)"
+            let headers = LocalArtwork.isReference(url) ? [:] : WebDavBridge.shared.playbackHeaders(fileUrl: url)
+            await OfflineArtworkStore.shared.retain(data: artwork, url: url, headers: headers, audioPath: destination.path)
+        }
+        try Task.checkCancellation()
+        guard jobs.contains(where: { $0.id == job.id && $0.runID == job.runID && $0.status == .running }) else { return }
+        var savedEntry = job.entry; savedEntry.artworkData = nil
         let asset = Asset(id: assetId, path: destination.path, provider: hit.provider, recordingIdentity: identity, codec: codec,
                           kbps: hit.kbps ?? 0, lossless: hit.lossless ?? false, youtubeVideoId: hit.youtubeVideoId,
-                          bytes: bytes.int64Value, sha256: hash, entry: job.entry, managed: true, sampleRate: hit.sampleRate, bitDepth: hit.bitDepth, quality: job.quality, recordingVerified: true)
+                          bytes: bytes.int64Value, sha256: hash, entry: savedEntry, managed: true, sampleRate: hit.sampleRate, bitDepth: hit.bitDepth, quality: job.quality, recordingVerified: true)
         index.assets[assetId] = asset; finishJob(job, asset: asset); persist()
         backend.finish(id: job.runID)
         LyricsTagBridge.shared.embedSidecar(audioPath: destination.path, videoId: hit.youtubeVideoId ?? job.entry.id,

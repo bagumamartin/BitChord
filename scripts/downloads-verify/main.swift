@@ -282,6 +282,7 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         assert(try! FileManager.default.contentsOfDirectory(at: logDirectory, includingPropertiesForKeys: nil).count == 1, "clear diagnostic history starts a fresh run")
         try? FileManager.default.removeItem(at: report)
         try await NetworkChecks.run(root: root)
+        try await ArtworkChecks.run(root: root)
         print("Download and diagnostic persistence checks complete")
     }
     @MainActor static func otherJobId(_ store: DownloadStore) -> String { store.jobs[0].id }

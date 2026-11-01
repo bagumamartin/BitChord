@@ -1153,25 +1153,6 @@ enum LyricsSourceCatalog {
     }
 }
 
-actor ArtworkRequests {
-    static let shared = ArtworkRequests()
-    private var flights: [String: Task<Data?, Never>] = [:]
-    func data(url: String, headers: [String: String]) async -> Data? {
-        let key = PageRequestCoordinator.digest(url + headers.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined())
-        if let task = flights[key] { return await task.value }
-        let task = Task<Data?, Never> {
-            if LocalArtwork.isReference(url) { return await LocalArtwork.shared.data(for: url) }
-            guard let endpoint = URL(string: url) else { return nil }
-            var request = URLRequest(url: endpoint)
-            headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-            return try? await GuardedHTTP.shared.data(for: request)
-        }
-        flights[key] = task
-        let data = await task.value
-        flights.removeValue(forKey: key)
-        return data
-    }
-}
 
 /// The Mac's row interaction: a click selects, a double click plays, and the
 /// keyboard can do both — Tab to the row, Return or Space to play it, and the

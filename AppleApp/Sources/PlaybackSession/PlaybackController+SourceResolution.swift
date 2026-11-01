@@ -95,6 +95,7 @@ extension PlaybackController {
     ) async throws -> ResolveOutcome {
         await DownloadStore.shared.waitUntilReady()
         try Task.checkCancellation()
+        if !entry.isLocal { await StreamFileCache.shared.remember(entry) }
         let pinnedOriginal = entry.source.hasPrefix("yt:") && OriginalVersion.shared.isPinned(videoId: entry.id)
         if let asset = await DownloadStore.shared.playbackAsset(for: entry, onlyOriginal: pinnedOriginal) {
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "download")

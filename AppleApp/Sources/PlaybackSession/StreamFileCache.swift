@@ -13,7 +13,10 @@ actor StreamFileCache {
     private var verifiedFiles: [String: (bytes: Int64, modified: Date, hash: String)] = [:]
     private var aliases: [String: [URL]]?
     private var verifiedSources: [String: (hash: String, mediaID: String)] = [:]
-    init(directory: URL? = nil) { self.directory = directory }
+    private var rememberedEntries: [String: QueueEntry] = [:]
+    private var artworkTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    private let artworkStore: OfflineArtworkStore
+    init(directory: URL? = nil, artworkStore: OfflineArtworkStore = .shared) { self.directory = directory; self.artworkStore = artworkStore }
 
     private static let defaultLimit: Int64 = 512 * 1024 * 1024
     private static let extensions = ["m4a", "mp4", "webm", "m4v", "aac", "flac", "ogg", "opus", "mp3", "wav", "aiff"]
@@ -33,6 +36,7 @@ actor StreamFileCache {
         var durationSeconds: Int? = nil
         var playbackMediaId: String? = nil
         var recordingVerified: Bool? = nil
+        var entry: QueueEntry? = nil
     }
     private var inFlight: [String: (path: String, quality: String, kbps: Int, loudnessDb: Double?, youtubeVideoId: String?, durationSeconds: Int?)] = [:]
     nonisolated static var qualityIdentity: String {
@@ -204,7 +208,8 @@ actor StreamFileCache {
         let playbackMediaId = videoId.contains("#") ? String(videoId.prefix(while: { $0 != "#" })) : nil
         let cachedCodec = codec == "unknown" ? (AudioDownloadContainer.fileExtension(at: dest.path)?.uppercased() ?? codec) : codec
         let recordingVerified = playbackMediaId.map { $0.hasPrefix("src:") || $0.hasPrefix("saavn:") || (verifiedSources[videoId]?.hash == hash && verifiedSources[videoId]?.mediaID == $0) } ?? true
-        let manifest = Manifest(codec: cachedCodec, kbps: kbps, quality: quality ?? Self.qualityIdentity, sourceIdentity: sourceIdentity, recordingIdentity: videoId, complete: true, bytes: bytes.int64Value, sha256: hash, youtubeVideoId: youtubeVideoId, relativeLoudnessDb: relativeLoudnessDb, durationSeconds: durationSeconds, playbackMediaId: playbackMediaId, recordingVerified: recordingVerified)
+        let entry = rememberedEntries[playbackMediaId ?? videoId]
+        let manifest = Manifest(codec: cachedCodec, kbps: kbps, quality: quality ?? Self.qualityIdentity, sourceIdentity: sourceIdentity, recordingIdentity: videoId, complete: true, bytes: bytes.int64Value, sha256: hash, youtubeVideoId: youtubeVideoId, relativeLoudnessDb: relativeLoudnessDb, durationSeconds: durationSeconds, playbackMediaId: playbackMediaId, recordingVerified: recordingVerified, entry: entry)
         guard let data = try? JSONEncoder().encode(manifest), (try? data.write(to: manifestURL(dest.path), options: .atomic)) != nil else { return }
         inFlight.removeValue(forKey: videoId)
         if let playbackMediaId { aliases?[playbackMediaId]?.removeAll { $0 == dest } }
@@ -215,6 +220,48 @@ actor StreamFileCache {
         }
         DiskCache.touch(manifestURL(dest.path))
         trim(keeping: videoId)
+        if let entry { preserveArtwork(entry, path: dest.path, allowNetwork: true) }
+    }
+
+    /// Preserve names and covers even if listening history or the image LRU is cleared.
+    func remember(_ entry: QueueEntry, allowNetwork: Bool = true) async {
+        var metadata = entry; metadata.artworkData = nil
+        if rememberedEntries.count >= 128, rememberedEntries[entry.id] == nil,
+           let expired = rememberedEntries.keys.first(where: { id in !inFlight.keys.contains(where: { String($0.prefix(while: { $0 != "#" })) == id }) }) {
+            rememberedEntries[expired] = nil
+        }
+        rememberedEntries[entry.id] = metadata
+        if let bytes = entry.artworkData, let url = entry.thumbnailUrl {
+            let headers = LocalArtwork.isReference(url) ? [:] : WebDavBridge.shared.playbackHeaders(fileUrl: url)
+            await artworkStore.cache(data: bytes, url: url, headers: headers)
+        }
+        let candidates = aliasedFiles(for: entry.id) + Self.extensions.map { cachedURL(for: entry.id, ext: $0) }
+        for file in Set(candidates) {
+            guard var manifest = self.metadata(at: file.path), manifest.complete,
+                  manifest.recordingIdentity == entry.id || (manifest.playbackMediaId == entry.id && manifest.recordingVerified == true),
+                  FileManager.default.fileExists(atPath: file.path) else { continue }
+            var saved = metadata
+            if let url = saved.thumbnailUrl, LocalArtwork.isReference(url),
+               let original = manifest.entry?.thumbnailUrl, !LocalArtwork.isReference(original) {
+                saved.thumbnailUrl = original
+            }
+            manifest.entry = saved
+            rememberedEntries[entry.id] = saved
+            if let encoded = try? JSONEncoder().encode(manifest) { try? encoded.write(to: manifestURL(file.path), options: .atomic) }
+            preserveArtwork(entry, path: file.path, allowNetwork: allowNetwork)
+        }
+    }
+    private func preserveArtwork(_ entry: QueueEntry, path: String, allowNetwork: Bool) {
+        artworkTasks[path]?.task.cancel()
+        let id = UUID(), store = artworkStore
+        let task = Task(priority: .utility) { [weak self] in
+            await OfflineArtwork.preserve(entry, audioPath: path, store: store, allowNetwork: allowNetwork)
+            await self?.finishedArtwork(path: path, id: id)
+        }
+        artworkTasks[path] = (id, task)
+    }
+    private func finishedArtwork(path: String, id: UUID) {
+        if artworkTasks[path]?.id == id { artworkTasks[path] = nil }
     }
 
     func markRecordingVerified(mediaID: String, cacheKey: String, sourcePath: String) {
@@ -237,6 +284,8 @@ actor StreamFileCache {
     }
 
     func clear() {
+        artworkTasks.values.forEach { $0.task.cancel() }; artworkTasks.removeAll()
+        rememberedEntries.removeAll()
         inFlight.removeAll()
         verifiedFiles.removeAll()
         aliases = nil
@@ -253,6 +302,8 @@ actor StreamFileCache {
         let durationSeconds: Int?
         let codec: String
         let modified: Date
+        var entry: QueueEntry? = nil
+        var artworkReference: String? = nil
 
         var id: String { videoId }
     }
@@ -281,7 +332,9 @@ actor StreamFileCache {
                 bytes: Int64(values?.fileSize ?? 0),
                 durationSeconds: manifest.durationSeconds,
                 codec: manifest.codec,
-                modified: values?.contentModificationDate ?? .distantPast
+                modified: values?.contentModificationDate ?? .distantPast,
+                entry: manifest.entry,
+                artworkReference: FileManager.default.fileExists(atPath: OfflineArtworkStore.coverURL(audioPath: audio.path).path) ? LocalArtwork.reference(path: audio.path) : nil
             ))
         }
         var seen: Set<String> = []
@@ -306,12 +359,18 @@ actor StreamFileCache {
         let growing = inFlight.removeValue(forKey: videoId)
         let fm = FileManager.default
         for file in aliasedFiles(for: videoId) {
+            artworkTasks.removeValue(forKey: file.path)?.task.cancel()
+            OfflineArtworkStore.remove(audioPath: file.path)
             try? fm.removeItem(at: file); try? fm.removeItem(at: manifestURL(file.path))
         }
         aliases?[videoId] = nil
         for ext in Self.extensions {
             let url = folder.appendingPathComponent("\(Self.sanitized(videoId)).\(ext)")
-            if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: url); try? fm.removeItem(at: manifestURL(url.path)) }
+            if fm.fileExists(atPath: url.path) {
+                artworkTasks.removeValue(forKey: url.path)?.task.cancel()
+                try? fm.removeItem(at: url); try? fm.removeItem(at: manifestURL(url.path))
+                OfflineArtworkStore.remove(audioPath: url.path)
+            }
         }
         if let growing, growing.path != folder.path {
             try? fm.removeItem(atPath: growing.path)
@@ -334,7 +393,8 @@ actor StreamFileCache {
                 aliases?[id]?.removeAll { $0 == file }
                 if aliases?[id]?.isEmpty == true { aliases?[id] = nil }
             }
-            for part in [file, manifestURL(file.path), file.appendingPathExtension("loudness.json")] {
+            artworkTasks.removeValue(forKey: file.path)?.task.cancel()
+            for part in [file, manifestURL(file.path), file.appendingPathExtension("loudness.json"), OfflineArtworkStore.coverURL(audioPath: file.path), file.appendingPathExtension("artwork.json")] {
                 let bytes = Int64((try? part.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
                 if (try? files.removeItem(at: part)) != nil { total -= bytes }
             }

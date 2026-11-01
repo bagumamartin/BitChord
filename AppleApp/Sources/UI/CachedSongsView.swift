@@ -75,9 +75,12 @@ struct CachedSongsView: View {
                         let queue = entries.map { cached in
                             let track = metadata[cached.videoId]
                             let source = cached.videoId.hasPrefix("src:") || cached.videoId.hasPrefix("saavn:") ? cached.videoId : "yt:" + cached.videoId
-                            return QueueEntry(id: cached.videoId, title: track?.title ?? cached.videoId,
-                                artist: track?.artist ?? "", source: source, thumbnailUrl: track?.art,
-                                albumName: track?.album, isLocal: false)
+                            return QueueEntry(id: cached.videoId, title: cached.entry?.title ?? track?.title ?? cached.videoId,
+                                artist: cached.entry?.artist ?? track?.artist ?? "", source: source,
+                                thumbnailUrl: cached.artworkReference ?? cached.entry?.thumbnailUrl ?? track?.art,
+                                durationText: cached.entry?.durationText,
+                                albumName: cached.entry?.albumName ?? track?.album, isLocal: false,
+                                isExplicit: cached.entry?.isExplicit, isVideo: cached.entry?.isVideo ?? false)
                         }
                         controller.play(queue, at: selected, context: "Cached songs", contextID: "cached:songs")
                     } label: { row(entry) }
@@ -103,14 +106,13 @@ struct CachedSongsView: View {
     private func row(_ entry: StreamFileCache.CachedEntry) -> some View {
         let track = metadata[entry.videoId]
         return HStack(spacing: 12) {
-            Image(systemName: "waveform")
-                .foregroundStyle(.secondary)
-                .frame(width: 28)
+            ArtworkView(url: entry.artworkReference ?? entry.entry?.thumbnailUrl ?? track?.art, data: nil, side: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 2) {
-                Text(track?.title ?? entry.videoId)
+                Text(entry.entry?.title ?? track?.title ?? entry.videoId)
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    if let artist = track?.artist, !artist.isEmpty {
+                    if let artist = entry.entry?.artist ?? track?.artist, !artist.isEmpty {
                         Text(artist).lineLimit(1)
                         Text("·")
                     }
@@ -133,7 +135,14 @@ struct CachedSongsView: View {
     private func load() async {
         let cached = await StreamFileCache.shared.entries()
         let names = ListeningStore.shared.trackMetadata()
-        entries = cached
+        for item in cached where item.entry == nil {
+            if let track = names[item.videoId] {
+                let source = item.videoId.hasPrefix("src:") || item.videoId.hasPrefix("saavn:") ? item.videoId : "yt:" + item.videoId
+                await StreamFileCache.shared.remember(QueueEntry(id: item.videoId, title: track.title,
+                    artist: track.artist, source: source, thumbnailUrl: track.art, albumName: track.album, isLocal: false), allowNetwork: false)
+            }
+        }
+        entries = await StreamFileCache.shared.entries()
         metadata = names
         loading = false
     }

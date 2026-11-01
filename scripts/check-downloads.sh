@@ -30,8 +30,12 @@ xcrun swiftc -module-cache-path "$WORK/modules" -parse-as-library -o "$WORK/veri
  "$ROOT/AppleApp/Sources/PlaybackSession/CanvasMediaRequest.swift" \
  "$ROOT/AppleApp/Sources/PlaybackSession/FileDownloadTransport.swift" \
  "$ROOT/AppleApp/Sources/PlaybackSession/LocalArtwork.swift" \
+ "$ROOT/AppleApp/Sources/PlaybackSession/OfflineArtworkStore.swift" \
+ "$ROOT/AppleApp/Sources/PlaybackSession/ArtworkRequests.swift" \
+ "$ROOT/AppleApp/Sources/App/GuardedHTTP.swift" \
  "$ROOT/AppleApp/Sources/PlaybackSession/PlaybackDebugLog.swift" \
  "$ROOT/AppleApp/Sources/PlaybackSession/PlaybackRegionStore.swift" \
  "$ROOT/scripts/downloads-verify/NetworkChecks.swift" \
+ "$ROOT/scripts/downloads-verify/ArtworkChecks.swift" \
  "$ROOT/scripts/downloads-verify/main.swift"
 "$WORK/verify"

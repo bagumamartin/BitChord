@@ -110,11 +110,17 @@ extension PlaybackController {
     }
 
     func refreshArtwork(_ entry: QueueEntry) {
-        guard let raw = entry.thumbnailUrl, !raw.isEmpty else { return }
+        let local = loadedSourcePath.flatMap { $0.hasPrefix("/") ? LocalArtwork.reference(path: $0) : nil }
+        guard let raw = entry.thumbnailUrl ?? local, !raw.isEmpty else { return }
         let sized = SharedArtwork.sized(raw, 544) ?? raw
         let headers = WebDavBridge.shared.playbackHeaders(fileUrl: sized)
         Task {
             guard let data = await ArtworkRequests.shared.data(url: sized, headers: headers), !data.isEmpty else { return }
+            var covered = entry; covered.artworkData = data
+            if !entry.isLocal { await StreamFileCache.shared.remember(covered) }
+            if let asset = DownloadStore.shared.asset(for: entry), asset.managed {
+                await OfflineArtwork.preserve(covered, audioPath: asset.path)
+            }
             await MainActor.run { [weak self] in
                 guard let self, self.current?.id == entry.id else { return }
                 self.current?.artworkData = data
@@ -126,6 +132,7 @@ extension PlaybackController {
                     duration: self.duration, artworkData: data,
                     thumbnailUrl: entry.thumbnailUrl, isPlaying: self.isPlaying, position: self.position
                 )
+                self.widgetPublisher.publish(entry: self.current, isPlaying: self.isPlaying, canNext: self.canPlayNext, canPrevious: self.canPlayPrevious)
             }
         }
     }

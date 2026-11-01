@@ -21,7 +21,10 @@ final class LocalArtwork: @unchecked Sendable {
         let attributes = try? FileManager.default.attributesOfItem(atPath: path)
         let stamp = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
-        parts.queryItems = [URLQueryItem(name: "version", value: "\(stamp):\(size)")]
+        let cover = try? FileManager.default.attributesOfItem(atPath: OfflineArtworkStore.coverURL(audioPath: path).path)
+        let coverStamp = (cover?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let coverSize = (cover?[.size] as? NSNumber)?.uint64Value ?? 0
+        parts.queryItems = [URLQueryItem(name: "version", value: "\(stamp):\(size):\(coverStamp):\(coverSize)")]
         return parts.string!
     }
 
@@ -40,6 +43,7 @@ final class LocalArtwork: @unchecked Sendable {
 
     func data(for reference: String) async -> Data? {
         guard let url = URL(string: reference), url.scheme == Self.scheme else { return nil }
+        let saved = await OfflineArtworkStore.shared.data(audioPath: url.path)
         let requested = URLComponents(string: reference)?.queryItems?.first { $0.name == "pixels" }?.value.flatMap(Int.init) ?? 1024
         let pixels = min(1024, max(64, requested))
         return await withCheckedContinuation { continuation in
@@ -50,7 +54,7 @@ final class LocalArtwork: @unchecked Sendable {
                     if let cached = self.memory.object(forKey: key) {
                         return cached.length == 0 ? nil : cached as Data
                     }
-                    let bytes = readTrackMetadata(path: url.path)?.artwork
+                    let bytes = saved ?? readTrackMetadata(path: url.path)?.artwork
                     let thumbnail = bytes.flatMap { Self.thumbnail($0, pixels: pixels) }
                     let cached = (thumbnail ?? Data()) as NSData
                     self.memory.setObject(cached, forKey: key, cost: cached.length)

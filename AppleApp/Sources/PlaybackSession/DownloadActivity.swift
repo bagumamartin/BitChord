@@ -51,6 +51,7 @@ protocol DownloadBackend: Sendable {
     func pause(id: String)
     func finish(id: String)
     func verify(path: String, entry: QueueEntry, provider: String) async throws
+    func artwork(for entry: QueueEntry) async -> Data?
 }
 extension DownloadBackend {
     func resolve(_ entry: QueueEntry, quality: String, youtubeFallback: Bool) async throws -> String { try await resolve(entry, quality: quality) }
@@ -59,4 +60,5 @@ extension DownloadBackend {
     func pause(id: String) { cancel(id: id) }
     func finish(id: String) {}
     func verify(path: String, entry: QueueEntry, provider: String) async throws {}
+    func artwork(for entry: QueueEntry) async -> Data? { entry.artworkData }
 }

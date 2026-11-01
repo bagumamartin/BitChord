@@ -2,6 +2,7 @@ import Foundation
 import BitChordShared
 
 struct BridgeDownloadBackend: DownloadBackend {
+    func artwork(for entry: QueueEntry) async -> Data? { await OfflineArtwork.data(for: entry) }
     func resolve(_ entry: QueueEntry, quality: String) async throws -> String {
         try await resolve(entry, quality: quality, youtubeFallback: false)
     }
@@ -79,6 +80,7 @@ struct BridgeDownloadBackend: DownloadBackend {
     func pause(id: String) { StreamDownloadBridge.shared.cancel(downloadId: id); FileDownloadTransport.shared.pause(id: id); FileDownloadTransport.credentialed.pause(id: id) }
     func finish(id: String) { FileDownloadTransport.shared.finish(id: id); FileDownloadTransport.credentialed.finish(id: id) }
     func verify(path: String, entry: QueueEntry, provider: String) async throws {
+        await StreamFileCache.shared.remember(entry)
         guard entry.source.hasPrefix("yt:"), let videoID = entry.videoId, provider != "youtube" else { return }
         if !(await NetworkQuality.shared.connected),
            await StreamFileCache.shared.path(for: videoID, allowGrowing: false, allowQualityFallback: true, onlyOriginal: true) == nil {
