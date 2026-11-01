@@ -203,12 +203,17 @@ private struct MacToolbarSearchField: View {
 /// The item draws its own glass. The toolbar's platter snaps to an item's new
 /// size instead of animating it, so the slot is widened to the pill's width
 /// first (`roomy`, invisible: the glass is still the button's circle, pinned
-/// trailing) and only then is the glass itself animated open.
+/// trailing) and only then is the glass itself animated open. The field is
+/// built with the slot, before the glass moves, and focused only once it has
+/// stopped: raising the keyboard mid-animation stalled the pill in its tracks.
+///
+/// `side` is the source switcher's measured height, so the button, the pill
+/// and the switcher stand the same height in the bar.
 private struct IPadToolbarSearchPill: View {
     static let openWidth: CGFloat = 300
-    static let side: CGFloat = 36
 
     @Binding var text: String
+    let side: CGFloat
     let roomy: Bool
     let open: Bool
     var focused: FocusState<Bool>.Binding
@@ -216,7 +221,7 @@ private struct IPadToolbarSearchPill: View {
     var onSubmit: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: open ? 8 : 0) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(open ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
@@ -225,14 +230,19 @@ private struct IPadToolbarSearchPill: View {
                 .accessibilityLabel("Search")
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHidden(open)
-            if open {
+            if roomy {
                 TextField("Artists, Songs, Lyrics, and More", text: $text)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .focused(focused)
                     .submitLabel(.search)
                     .onSubmit(onSubmit)
-                    .transition(.opacity)
+                    .frame(maxWidth: open ? .infinity : 0)
+                    .opacity(open ? 1 : 0)
+                    .allowsHitTesting(open)
+                    .accessibilityHidden(!open)
+            }
+            if open {
                 if !text.isEmpty {
                     Button {
                         text = ""
@@ -247,8 +257,8 @@ private struct IPadToolbarSearchPill: View {
                 }
             }
         }
-        .padding(.horizontal, open ? 12 : 0)
-        .frame(width: open ? Self.openWidth : Self.side, height: Self.side)
+        .padding(.horizontal, open ? 14 : 0)
+        .frame(width: open ? Self.openWidth : side, height: side)
         .chromeGlass(in: Capsule())
         .contentShape(Capsule())
         .onTapGesture {
@@ -258,7 +268,7 @@ private struct IPadToolbarSearchPill: View {
                 onExpand()
             }
         }
-        .frame(width: roomy ? Self.openWidth : Self.side, alignment: .trailing)
+        .frame(width: roomy ? Self.openWidth : side, alignment: .trailing)
     }
 }
 
@@ -365,6 +375,8 @@ struct SearchView: View {
     @State private var pillRoomy = false
     @State private var pillOpen = false
     @State private var pillGeneration = 0
+    /// The iPad source switcher's height in the bar, which the pill matches.
+    @State private var switcherHeight: CGFloat = 36
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -450,11 +462,17 @@ struct SearchView: View {
                             ToolbarSpacer(.fixed, placement: .topBarTrailing)
                             ToolbarItem(placement: .topBarTrailing) {
                                 ToolbarSearchSourceSwitcher(selection: $searchSource)
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                                        if height > 0 { switcherHeight = height }
+                                    }
                             }
                             .sharedBackgroundVisibility(.hidden)
                         } else {
                             ToolbarItem(placement: .topBarTrailing) {
                                 ToolbarSearchSourceSwitcher(selection: $searchSource)
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                                        if height > 0 { switcherHeight = height }
+                                    }
                             }
                         }
                     } else {
@@ -593,6 +611,7 @@ struct SearchView: View {
     private var iPadSearchPill: some View {
         IPadToolbarSearchPill(
             text: $query,
+            side: switcherHeight,
             roomy: pillRoomy,
             open: pillOpen,
             focused: $searchFieldFocused,
@@ -634,13 +653,15 @@ struct SearchView: View {
                 try? await Task.sleep(for: .milliseconds(300))
                 guard current() else { return }
                 pillRoomy = true
-                // One frame for the bar to lay out the wider slot.
-                try? await Task.sleep(for: .milliseconds(20))
+                // A few frames for the bar to lay out the wider slot and for
+                // the field to be built, so neither lands inside the animation.
+                try? await Task.sleep(for: .milliseconds(60))
                 guard current() else { return }
                 withAnimation(.smooth(duration: 0.35)) { pillOpen = true }
                 guard focus else { return }
-                // The field is inserted by that same update; focus it on the next.
-                try? await Task.sleep(for: .milliseconds(50))
+                // After the glass has settled: the keyboard's arrival relays
+                // out the whole page, and mid-animation that froze the pill.
+                try? await Task.sleep(for: .milliseconds(360))
                 guard current() else { return }
                 searchFieldFocused = true
             } else {
