@@ -9,6 +9,65 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.4</title>
+            <pubDate>Sun, 01 Nov 2026 21:27:27 +0100</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.4</sparkle:fullReleaseNotesLink>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.4
+
+## Automix
+
+- Beat detection now runs on the Neural Engine through Core ML. It is about four to five times faster on Apple Silicon and closer to the original model than before. Short tracks, and anything the Neural Engine can't take, fall back to the CPU.
+- Both Automix models, the beat tracker and the vocal detector, are now optional downloads that are verified on the device. The app no longer bundles the vocal model, so it is smaller. BitChord offers them at launch and in Settings. Without them, Automix uses its built-in fallbacks.
+- When a tempo glide ends, the waveform phase stays put. Tempo-aligned stretches keep stereo phase, and the bass in a transition is no longer lost.
+- Analysis work is capped in CPU and memory, and stale analysis is cancelled.
+
+## Search
+
+- A new **Library** source sits beside YouTube and Addons. It filters your signed-in library (songs, artists, albums, playlists) and the music on this device as you type, without network requests.
+- **iPad:** a round search button grows into the search field. In portrait, the source switcher moves under the top bar.
+- **Mac:** the search field, source switcher, account and Downloads sit in order in the title bar, and switching source re-runs the search.
+
+## iPad
+
+- iPad now uses the system's adaptable sidebar, as Music does. It holds a Playlists section with Liked Music first, and the account and Settings at its foot.
+- Each tab keeps a page history, with back and forward buttons beside the logo (and ⌘[ / ⌘]).
+- The playback pill is capped at the mini-player width. In portrait, the volume row lines up with the Lyrics and Up Next buttons.
+
+## iPhone
+
+- The player pill tucks into the minimized tab bar while you scroll, and rides above the keyboard.
+
+## Playback and sources
+
+- Lossless streams are used whenever the quality setting is Lossless, whatever the output. As upstream does, Bluetooth only sidelines addons that require a lossless-capable output.
+- Lossless sources are preferred before playback starts, and completed quality upgrades are confirmed. BitChord checks decoded formats, and interrupted playback recovers with a capped number of retries.
+- Playback sessions are kept across restarts. Source lists survive storage read failures, and each source shows its check and renewal state.
+- The JioSaavn catalogue and playback work again.
+- Addon session renewal is opt-in and uses provider links you supply.
+- Normalization headroom is back in Transparent playback, and explicit gapless repeat works.
+- Audio settings now separate the requested quality, the measured output and the processing. The quality status is clearer, and the diagnostics refresh live.
+
+## Offline and downloads
+
+- Downloads show per-song progress and pending states.
+- Cached and downloaded songs keep their artwork, and covers come back after launch without network requests. Offline playback is kept.
+
+## Fixes
+
+- Mac: the player's back button responds across its full visible area, and a crash in Settings is fixed.
+- Videos start faster.
+- Leaks during audio engine and interpreter teardown are fixed.
+- The Liquid Glass icon draws its waves at full size.
+- Version & Updates compares both version and build, and offers the installer for your platform.
+
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.4/BitChord-1.0.4-build13-mac-arm64.dmg" length="19108712" type="application/octet-stream" sparkle:edSignature="O8oOzE6813XZXeKW4rHhGV1xY+/10ehvoHY0Gzi0UugaD5T8aTyMQ+Lx+TfAFPTbqLhnvU19h7zb9QMZGY9JBA=="/>
+        </item>
+        <item>
             <title>1.0.3</title>
             <pubDate>Sun, 25 Oct 2026 21:27:37 +0100</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.3</sparkle:fullReleaseNotesLink>
@@ -107,61 +166,9 @@ b96c690b24a491db88a8f7af9272a75c42c39220a15699607d05f1d0df56968b  BitChord-1.0.2
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.2/BitChord-1.0.2.dmg" length="37237019" type="application/octet-stream" sparkle:edSignature="/h9iTJfKy+6dIaOPE0Z6F444BhADFZDacgXkoWQZgs0huvmnztycKF/DUIMZwBBLy1w+L7MIbTlBEpJJuFO0Cg=="/>
         </item>
-        <item>
-            <title>1.0.1</title>
-            <pubDate>Sun, 25 Oct 2026 14:36:47 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.1</sparkle:fullReleaseNotesLink>
-            <sparkle:version>5</sparkle:version>
-            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.1
-
-## Search and browse
-
-- Show up to 15 song, album, and artist suggestions while typing, up from 8.
-
-## Requirements
-
-- macOS 15 or later on Apple Silicon.
-- iOS or iPadOS 18 or later.
-
-## Downloads and installation
-
-- **Mac:** Apple Silicon DMG. It is ad-hoc signed, not notarized, and not Developer ID signed.
-- **iOS:** Unsigned IPA for sideloading with AltStore, SideStore, or Sideloadly, or for signing with your own Apple Developer team.
-
-### Install on Mac
-
-Drag BitChord to Applications, then open it. If Gatekeeper blocks the first launch, use either route:
-
-- **System Settings:** Open System Settings → Privacy & Security, scroll to Security, choose **Open Anyway** for BitChord, then confirm **Open** in the warning dialog.
-- **Terminal:** After moving BitChord to Applications, run:
-
-  ```sh
-  xattr -dr com.apple.quarantine "/Applications/BitChord.app"
-  open "/Applications/BitChord.app"
-  ```
-
-### Sideload on iPhone or iPad
-
-1. Install AltStore, SideStore, or Sideloadly and connect the device as required by that tool.
-2. Import the unsigned IPA and sign it with your Apple account or developer team.
-3. Install the signed app and trust the developer profile if iOS asks.
-
-To use iCloud lyrics-choice or sign-in sharing, sign the app with your own team and enable the matching iCloud Key-Value Store and iCloud Keychain capabilities and provisioning profile. Otherwise those features use local device storage.
-
-## Legal
-
-BitChord does not host or provide media. Playback uses configured third-party services and their APIs; availability and terms are controlled by those services. See the [README Disclaimer & Legal Notice](https://github.com/bagumamartin/BitChord/blob/v1.0.1/README.md#disclaimer--legal-notice).
-
-Every GitHub release is built from its tagged commit, and that tag's source archive is the Corresponding Source under GPLv3 §6. The source for this release is the [v1.0.1 tag](https://github.com/bagumamartin/BitChord/tree/v1.0.1).
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.1/BitChord-1.0.1.dmg" length="41904837" type="application/octet-stream" sparkle:edSignature="xHD0Il14ymnYAkpiqtnIcYPyvEX1Il1GlaYifU5rL34Az1N3Bbcb7SGj1Vr7EVJ7Ub9aC1j2Lx0d9AIKh/E3Bw=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: AIpag5L3G6CBxY5kHmgsGBKBVS2UKsG279jKMLDjV0yLLIJx3HRx75tuPdBPWocoJ4niRJS1pkX0DBvDT3zMAw==
-length: 9832
+edSignature: gRAJ9x7OmbTNisX/M5dSZ/51FviLnCtn7B7O6uZftEn0m9k8GI9QCT+XGAuI7MMdJHmI+jWvwmRRmyYgknixBA==
+length: 11123
 -->
