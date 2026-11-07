@@ -7,6 +7,14 @@ import kotlin.test.assertNotNull
 
 class TtmlMarkupTest {
     @Test
+    fun xml_comments_never_become_lyric_text_or_span_structure() {
+        val line = parse("""<!-- before --><span begin="1s" end="2s">Sun<!-- provider <span> annotation </span> -->rise</span><!-- after -->""")
+
+        assertEquals("Sunrise", line.text)
+        assertEquals(listOf(LyricWordDto(1_000, 2_000, "Sunrise")), line.words)
+    }
+
+    @Test
     fun nested_formatting_does_not_leave_closing_tags_in_a_timed_word() {
         val line = parse("""<span begin="1s" end="2s">sun<span>rise</span></span>""")
 
