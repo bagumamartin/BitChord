@@ -19,7 +19,7 @@ def between(source, start, end):
 pieces = [
     "import AppKit\nimport SwiftUI\nimport Observation\n",
     between(common, "@Observable\nfinal class RowSelection", "/// A queue row:"),
-    between(common, "private struct MacRowInteraction", "/// Which lyric line"),
+    between(common, "private struct MacRowInteraction", "/// Which lyric line").strip().removesuffix("#endif"),
     common[common.index("/// The page half of keyboard navigation:"):],
     between(shell, "struct MacTransportKeys:", "// MARK: - Inspector"),
     between(search, "private struct MacToolbarSearchField:", "\n#else"),

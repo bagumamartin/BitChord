@@ -334,29 +334,26 @@ struct MacDownloadsButton: View {
 /// Space plays and pauses, ← and → step the queue — for the whole window, from
 /// wherever the listener is.
 ///
-/// These are not menu key equivalents, and that is the point: a menu shortcut with
-/// no modifier is matched before the focused view sees the event, so a Space menu
-/// item takes the space out of the search box, the playlist name and the cookie
-/// field. Here the key arrives only if nothing else took it — a text field's field
-/// editor inserts the space and the event never climbs this far — which is the
-/// behaviour Music has.
+/// Keep these out of menu key equivalents, which take precedence over text
+/// editing. Also check the native field editor: toolbar text input can still
+/// reach this handler while SwiftUI's content focus is catching up.
 struct MacTransportKeys: ViewModifier {
     let controller: PlaybackController
 
     func body(content: Content) -> some View {
         content
             .onKeyPress(.space, phases: .down) { press in
-                guard press.modifiers.isEmpty else { return .ignored }
+                guard press.modifiers.isEmpty, !MacKeyboardInput.isEditingText else { return .ignored }
                 controller.togglePlayPause()
                 return .handled
             }
             .onKeyPress(.leftArrow, phases: .down) { press in
-                guard press.modifiers.isEmpty else { return .ignored }
+                guard press.modifiers.isEmpty, !MacKeyboardInput.isEditingText else { return .ignored }
                 controller.previous()
                 return .handled
             }
             .onKeyPress(.rightArrow, phases: .down) { press in
-                guard press.modifiers.isEmpty else { return .ignored }
+                guard press.modifiers.isEmpty, !MacKeyboardInput.isEditingText else { return .ignored }
                 controller.next()
                 return .handled
             }

@@ -622,8 +622,8 @@ final class RowSelection {
     ///
     /// Registered by the page, because a row knows what it is but not who its
     /// neighbours are, and the arrow keys are a question about neighbours. Pages
-    /// that never register anything keep today's behaviour: click to select, Tab
-    /// and Return to play, no arrows.
+    /// that never register anything still support clicking, Tab and Return,
+    /// without arrow navigation.
     private(set) var order: [String] = []
 
     func select(_ id: String) {
@@ -872,8 +872,8 @@ struct SongRow: View {
 
     private var rowFill: Color {
         #if os(macOS)
-        // A selected row outranks the playing and hover tints: it is the row the
-        // next double click would play.
+        // A selected row outranks the playing and hover tints, including when
+        // keyboard navigation selects a row without starting playback.
         if isSelected { return Color.accentColor.opacity(0.16) }
         #endif
         if active { return Color.primary.opacity(0.08) }
@@ -1154,32 +1154,30 @@ enum LyricsSourceCatalog {
 }
 
 
-/// The Mac's row interaction: a click selects, a double click plays, and the
-/// keyboard can do both — Tab to the row, Return or Space to play it, and the
-/// arrows to walk the page's other rows (the page registers their order).
+/// The Mac's row interaction: play on one click by default, or select on one
+/// click and play on two when Single-Click to Play is off. Tab, Return/Space and
+/// arrow navigation work in either mode.
 ///
 /// Its own modifier rather than nine links in the row's chain: the chain was long
 /// enough that the type checker gave up on it, and the row's body reads better
 /// when the Mac's interaction is named.
+#if os(macOS)
 private struct MacRowInteraction: ViewModifier {
     let id: String
     let play: () -> Void
     let selection: RowSelection?
+    @AppStorage("mac_single_click_play") private var singleClickToPlay = true
 
     func body(content: Content) -> some View {
-        content
-            .contentShape(.rect)
-            // Double click first: SwiftUI resolves the more specific gesture, so
-            // a play does not also land as a selection click.
-            .onTapGesture(count: 2) { play() }
-            .onTapGesture { selection?.select(id) }
+        clickTarget(content)
+            .allowsWindowActivationEvents(true)
             // A row that can only be clicked is not a Mac row: it is focusable,
             // Return and Space play it, and VoiceOver's "press" does the same
             // through the default action.
             .focusable()
             .focusedRow(id)
-            .onKeyPress(.return) { play(); return .handled }
-            .onKeyPress(.space) { play(); return .handled }
+            .onKeyPress(.return, phases: .down, action: activate)
+            .onKeyPress(.space, phases: .down, action: activate)
             // Up and down walk the page's rows. Only the bare keys: ⌘↑ and ⌘↓ are
             // the volume commands and must reach them. `move` answers whether it
             // went anywhere, so at the ends of a list the key is left alone and can
@@ -1192,12 +1190,39 @@ private struct MacRowInteraction: ViewModifier {
             }
     }
 
+    @ViewBuilder
+    private func clickTarget(_ content: Content) -> some View {
+        if singleClickToPlay {
+            // Do not install a competing double-tap recognizer in this mode:
+            // the first click should start playback without a double-click wait.
+            content.contentShape(.rect)
+                .onTapGesture {
+                    selection?.select(id)
+                    play()
+                }
+        } else {
+            content.contentShape(.rect)
+                .onTapGesture(count: 2) {
+                    selection?.select(id)
+                    play()
+                }
+                .onTapGesture { selection?.select(id) }
+        }
+    }
+
+    private func activate(_ press: KeyPress) -> KeyPress.Result {
+        guard press.modifiers.isEmpty, !MacKeyboardInput.isEditingText else { return .ignored }
+        play()
+        return .handled
+    }
+
     private static func walk(_ press: KeyPress, by offset: Int, selection: RowSelection?) -> KeyPress.Result {
-        guard press.modifiers.isEmpty else { return .ignored }
+        guard press.modifiers.isEmpty, !MacKeyboardInput.isEditingText else { return .ignored }
         let moved: Bool = selection?.move(by: offset) ?? false
         return moved ? .handled : .ignored
     }
 }
+#endif
 
 /// Which lyric line the playhead is in.
 ///
