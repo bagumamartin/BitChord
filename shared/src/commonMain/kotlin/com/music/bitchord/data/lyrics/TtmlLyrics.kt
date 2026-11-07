@@ -11,7 +11,7 @@ object TtmlLyrics {
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
     private val TAG = Regex(
-        """<(/?)([a-z][\w:.-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>""",
+        """<!--.*?-->|<(/?)([a-z][\w:.-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>""",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
     private val BEGIN = Regex("""begin="([^"]+)"""")
