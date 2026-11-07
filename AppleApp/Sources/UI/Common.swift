@@ -1155,8 +1155,9 @@ enum LyricsSourceCatalog {
 
 
 /// The Mac's row interaction: play on one click by default, or select on one
-/// click and play on two when Single-Click to Play is off. Tab, Return/Space and
-/// arrow navigation work in either mode.
+/// click and play on two when Single-Click to Play is off. Tab, Return and arrow
+/// navigation work in either mode; Space plays the row when the window's
+/// play/pause handler has not already handled it.
 ///
 /// Its own modifier rather than nine links in the row's chain: the chain was long
 /// enough that the type checker gave up on it, and the row's body reads better
@@ -1171,9 +1172,9 @@ private struct MacRowInteraction: ViewModifier {
     func body(content: Content) -> some View {
         clickTarget(content)
             .allowsWindowActivationEvents(true)
-            // A row that can only be clicked is not a Mac row: it is focusable,
-            // Return and Space play it, and VoiceOver's "press" does the same
-            // through the default action.
+            // Keep keyboard focus in either click mode. Return plays the row;
+            // Space is a fallback when the window has no transport handler.
+            // VoiceOver's press is supplied by SongRow's default action.
             .focusable()
             .focusedRow(id)
             .onKeyPress(.return, phases: .down, action: activate)
