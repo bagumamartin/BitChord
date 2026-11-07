@@ -20,6 +20,7 @@ struct SettingsView: View {
     @AppStorage("dolby_atmos") var dolbyAtmos = true
     #if os(macOS)
     @AppStorage("menu_bar_player") var menuBarPlayer = true
+    @AppStorage("mac_single_click_play") var singleClickToPlay = true
     #endif
     @State var spatial = PlatformSettings.shared.getBoolean(key: "spatial_audio", default: false)
     @State var automix = PlatformSettings.shared.getBoolean(key: "smart_fade_enabled", default: true)
