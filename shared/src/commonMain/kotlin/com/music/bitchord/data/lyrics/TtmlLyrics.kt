@@ -2,7 +2,7 @@ package com.music.bitchord.data.lyrics
 
 /**
  * Apple Music TTML — `<p>` lines with timed `<span>` syllables.
- * Regex-based so commonMain does not need an XML parser.
+ * A tag scan keeps nested spans balanced without adding a platform XML parser.
  */
 object TtmlLyrics {
 
@@ -10,8 +10,8 @@ object TtmlLyrics {
         """<p\b([^>]*)>(.*?)</p>""",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
-    private val SPAN = Regex(
-        """<span\b([^>]*)>(.*?)</span>""",
+    private val TAG = Regex(
+        """<(/?)([a-z][\w:.-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>""",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
     private val BEGIN = Regex("""begin="([^"]+)"""")
@@ -73,37 +73,9 @@ object TtmlLyrics {
             val role = ROLE.find(attrs)?.groupValues?.get(1).orEmpty()
             if (role == "x-translation" || role == "x-roman") return@mapNotNull null
             val inner = p.groupValues[2]
-            val leadRuns = mutableListOf<TimedRun>()
-            val backingRuns = mutableListOf<TimedRun>()
-            var previousEnd = 0
-            var previousRun: Pair<MutableList<TimedRun>, Int>? = null
-            SPAN.findAll(inner).forEach { span ->
-                val gap = inner.substring(previousEnd, span.range.first)
-                if (gap.isNotEmpty()) {
-                    previousRun?.let { (runs, index) ->
-                        runs[index] = runs[index].copy(raw = runs[index].raw + gap)
-                    }
-                }
-                previousEnd = span.range.last + 1
-                val sattrs = span.groupValues[1]
-                val srole = ROLE.find(sattrs)?.groupValues?.get(1).orEmpty()
-                if (srole == "x-translation" || srole == "x-roman") return@forEach
-                val begin = time(BEGIN.find(sattrs)?.groupValues?.get(1)) ?: return@forEach
-                val end = time(END.find(sattrs)?.groupValues?.get(1)) ?: begin + 200
-                val text = decode(span.groupValues[2].replace(Regex("<[^>]+>"), ""))
-                val target = if (srole == "x-bg") backingRuns else leadRuns
-                if (text.isEmpty()) return@forEach
-                target += TimedRun(begin, end, text)
-                previousRun = target to target.lastIndex
-            }
-            if (previousEnd < inner.length) {
-                previousRun?.let { (runs, index) ->
-                    val trailingText = inner.substring(previousEnd)
-                    runs[index] = runs[index].copy(raw = runs[index].raw + trailingText)
-                }
-            }
-            val lead = wordsFromRuns(leadRuns)
-            val backing = wordsFromRuns(backingRuns)
+            val content = parseContent(inner)
+            val lead = wordsFromRuns(content.lead)
+            val backing = wordsFromRuns(content.backing)
             val pBegin = time(BEGIN.find(attrs)?.groupValues?.get(1))
             val pEnd = time(END.find(attrs)?.groupValues?.get(1))
             val background = backing.takeIf { it.isNotEmpty() }?.let {
@@ -124,11 +96,93 @@ object TtmlLyrics {
                     background = background,
                 ) to agent
             } else {
-                val text = decode(inner.replace(Regex("<[^>]+>"), "").trim())
+                val text = content.plain.trim()
                 if (text.isEmpty() || pBegin == null) null
                 else LyricLineDto(pBegin, text, sungUntilMs = pEnd?.takeIf { it > pBegin }, background = background) to agent
             }
         }.sortedBy { it.first.timeMs }.toList()
+    }
+
+    private data class SpanTiming(val id: Int, val begin: Long, val end: Long)
+    private data class SpanContext(
+        val timing: SpanTiming? = null,
+        val background: Boolean = false,
+        val suppressed: Boolean = false,
+    )
+    private data class Content(
+        val lead: MutableList<TimedRun> = mutableListOf(),
+        val backing: MutableList<TimedRun> = mutableListOf(),
+        var plain: String = "",
+    )
+
+    /**
+     * A span can wrap other timed spans, or just style part of a timed word.
+     * Matching through the first closing tag loses both cases: a wrapper steals
+     * its first child's timing, and its remaining `</span>` becomes sung text.
+     * Inherit timing/role through a stack, emitting only the text between tags.
+     */
+    private fun parseContent(inner: String): Content {
+        val out = Content()
+        val stack = mutableListOf<SpanContext>()
+        val plain = StringBuilder()
+        val leading = StringBuilder()
+        val backingLeading = StringBuilder()
+        var lastLeadTiming: Int? = null
+        var lastBackingTiming: Int? = null
+
+        fun append(raw: String) {
+            val context = stack.lastOrNull() ?: SpanContext()
+            if (context.suppressed || raw.isEmpty()) return
+            val text = decode(raw)
+            if (!context.background) plain.append(text)
+            val runs = if (context.background) out.backing else out.lead
+            val pending = if (context.background) backingLeading else leading
+            val timing = context.timing
+            val previous = runs.lastOrNull()
+            val sameTiming = timing?.id == if (context.background) lastBackingTiming else lastLeadTiming
+            if (previous != null && (timing == null || sameTiming)) {
+                runs[runs.lastIndex] = previous.copy(raw = previous.raw + text)
+            } else if (timing != null) {
+                runs += TimedRun(timing.begin, timing.end, pending.toString() + text)
+                pending.clear()
+                if (context.background) lastBackingTiming = timing.id else lastLeadTiming = timing.id
+            } else {
+                pending.append(text)
+            }
+        }
+
+        var previousEnd = 0
+        TAG.findAll(inner).forEach { tag ->
+            append(inner.substring(previousEnd, tag.range.first))
+            previousEnd = tag.range.last + 1
+            when (tag.groupValues[2].lowercase()) {
+                "span" -> {
+                    if (tag.groupValues[1].isNotEmpty()) {
+                        if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
+                    } else {
+                        val attrs = tag.groupValues[3]
+                        val parent = stack.lastOrNull() ?: SpanContext()
+                        val role = ROLE.find(attrs)?.groupValues?.get(1)
+                        val begin = time(BEGIN.find(attrs)?.groupValues?.get(1))
+                        val end = time(END.find(attrs)?.groupValues?.get(1))
+                        val timing = begin?.let {
+                            SpanTiming(tag.range.first, it, end ?: parent.timing?.end ?: it + 200)
+                        } ?: parent.timing
+                        if (!attrs.trimEnd().endsWith('/')) {
+                            stack += SpanContext(
+                                timing = timing,
+                                background = parent.background || role == "x-bg",
+                                suppressed = parent.suppressed || role == "x-translation" || role == "x-roman",
+                            )
+                        }
+                    }
+                }
+                "br" -> if (tag.groupValues[1].isEmpty()) append("\n")
+            }
+        }
+        append(inner.substring(previousEnd))
+        out.plain = plain.toString()
+        return out
     }
 
     internal fun time(value: String?): Long? {

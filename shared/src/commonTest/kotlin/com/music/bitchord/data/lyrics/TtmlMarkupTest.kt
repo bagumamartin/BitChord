@@ -26,6 +26,17 @@ class TtmlMarkupTest {
     }
 
     @Test
+    fun timed_children_override_the_surrounding_span_without_duplicates() {
+        val line = parse("""<span begin="0.8s" end="2.5s"><span begin="1s" end="1.4s">Morning </span><span begin="1.5s" end="2s">light</span></span>""")
+
+        assertEquals("Morning light", line.text)
+        assertEquals(
+            listOf(LyricWordDto(1_000, 1_400, "Morning"), LyricWordDto(1_500, 2_000, "light")),
+            line.words,
+        )
+    }
+
+    @Test
     fun nested_background_vocals_keep_their_role_and_timestamps() {
         val line = parse("""<span begin="1s" end="2s">Lead</span><span ttm:role="x-bg"><span><span begin="1.2s" end="1.8s">Echo</span></span></span>""")
 
