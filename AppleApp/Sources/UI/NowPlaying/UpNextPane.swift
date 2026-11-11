@@ -214,6 +214,7 @@ struct UpNextPane: View {
                         .lineLimit(1)
                     ArtistCreditText(
                         credit: controller.current?.artist ?? "",
+                        artistId: controller.current?.artistId,
                         font: .caption,
                         color: .white.opacity(0.65)
                     )

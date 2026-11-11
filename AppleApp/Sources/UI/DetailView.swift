@@ -267,40 +267,8 @@ struct DetailView: View {
                             }
                         }
 
-                        if let desc = page.description, !desc.isEmpty, kind(of: page) != .playlist {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(isArtist ? "About the artist" : "About the album")
-                                    .font(.headline)
-                                Text(desc)
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 28)
-                            .padding(.top, 28)
-                        }
-
-                        if isArtist, let signature = artistSignature {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Artist signature")
-                                    .font(.headline)
-                                AsyncImage(url: signature.imageURL) { image in
-                                    image.resizable()
-                                        .renderingMode(.template)
-                                        .scaledToFit()
-                                        .foregroundStyle(.primary)
-                                } placeholder: {
-                                    ProgressView()
-                                }
-                                .frame(maxWidth: 260, maxHeight: 100, alignment: .leading)
-                                .accessibilityLabel("Artist signature for \(signature.artistName)")
-                                Text("Signed by \(signature.artistName)")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 28)
-                            .padding(.top, 24)
+                        if !isArtist {
+                            aboutSection(page, isArtist: false)
                         }
 
                         ForEach(page.sections) { shelf in
@@ -321,6 +289,12 @@ struct DetailView: View {
                                 .padding(.horizontal, 28)
                                 .padding(.top, 28)
                             }
+                        }
+
+                        // On an artist page About closes the page, after the
+                        // shelves, with the counts under the text (upstream).
+                        if isArtist {
+                            aboutSection(page, isArtist: true)
                         }
                     }
                     .frame(maxWidth: 860)
@@ -359,6 +333,11 @@ struct DetailView: View {
                 if let urlString = page.url, let url = URL(string: urlString) {
                     ShareLink(item: url) {
                         Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    if kind(of: page) == .artist {
+                        Link(destination: url) {
+                            Label("Open in YouTube Music", systemImage: "arrow.up.right.square")
+                        }
                     }
                 }
                 if !pinned {
@@ -417,12 +396,7 @@ struct DetailView: View {
         tint: ArtworkPalette.PageTint,
         artHeight: CGFloat
     ) -> some View {
-        let lines = headerLines(page)
         let title = page.title.isEmpty ? initialTitle : page.title
-        let credit = lines.credit.isEmpty ? (page.songs.first?.artist ?? "") : lines.credit
-        // A page whose subtitle repeats its own name (which artist pages often
-        // do, by way of the top songs' credit) does not need to say it twice.
-        let showCredit = !credit.isEmpty && credit.localizedCaseInsensitiveCompare(title) != .orderedSame
 
         return ZStack(alignment: .bottom) {
             ZStack(alignment: .top) {
@@ -484,32 +458,11 @@ struct DetailView: View {
                         .padding(.horizontal, 24)
                 }
 
-                if showCredit {
-                    Text(credit)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(tint.accent)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(1)
-                        .padding(.horizontal, 24)
-                }
-
-                if !lines.meta.isEmpty {
-                    Text(lines.meta)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(1)
-                        .padding(.horizontal, 24)
-                }
-
-                if page.subscriberCountText != nil || page.monthlyListenerCount != nil {
-                    artistStatsRow(page: page, tint: tint)
-                        .padding(.top, 4)
-                }
-
+                // Upstream's header is the name (or its logo) alone: the
+                // subscriber and listener counts close the page, in About.
                 if !page.songs.isEmpty {
                     actionRow(page, tint: tint, isArtist: true)
-                        .padding(.top, 10)
+                        .padding(.top, 14)
                 }
             }
             .padding(.bottom, 12)
@@ -611,22 +564,20 @@ struct DetailView: View {
         tint: ArtworkPalette.PageTint,
         isArtist: Bool
     ) -> some View {
-        HStack(spacing: 12) {
+        // Upstream's artist ActionRow: Shuffle and Subscribe (52) either side
+        // of a 70pt Play circle, 24 apart, centred. The page's overflow is the
+        // navigation bar's, so the row carries no menu of its own.
+        HStack(spacing: isArtist ? 24 : 12) {
             if isArtist {
-                if auth.signedIn, let subscription = page.subscription {
-                    let isSub = subscriptionOverride ?? subscription.subscribed
-                    CircleIconButton(
-                        icon: Image(systemName: isSub ? "checkmark" : "plus"),
-                        label: isSub ? "Unsubscribe" : "Subscribe",
-                        active: isSub,
-                        activeColor: tint.accent,
-                        disabled: subscribing
-                    ) {
-                        Task { await toggleSubscription(subscription, artistName: page.title) }
-                    }
+                CircleIconButton(icon: Image(.bchShuffle), label: "Shuffle", size: 52, veiled: true) {
+                    controller.play(
+                        page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) },
+                        context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true,
+                        boundedContext: true, continuationToken: handoffContinuation(page)
+                    )
                 }
 
-                PlayPill(iconOnly: false, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
+                PlayCircle(isPlaying: controller.isPlaybackContextPlaying(browseId), size: 70) {
                     let entries = page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) }
                     controller.togglePlaybackContext(
                         entries, title: page.title, contextID: browseId,
@@ -635,18 +586,21 @@ struct DetailView: View {
                     )
                 }
 
+                // A guest sees Subscribe dimmed rather than missing, so the row
+                // keeps its shape (upstream's disabled star).
+                let subscription = auth.signedIn ? page.subscription : nil
+                let isSub = subscription.map { subscriptionOverride ?? $0.subscribed } ?? false
                 CircleIconButton(
-                    icon: Image(.bchShuffle),
-                    label: "Shuffle"
+                    icon: Image(systemName: isSub ? "star.fill" : "star"),
+                    label: isSub ? "Unsubscribe" : "Subscribe",
+                    size: 52,
+                    veiled: true,
+                    disabled: subscription == nil || subscribing
                 ) {
-                    controller.play(
-                        page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) },
-                        context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true,
-                        boundedContext: true, continuationToken: handoffContinuation(page)
-                    )
+                    if let subscription {
+                        Task { await toggleSubscription(subscription, artistName: page.title) }
+                    }
                 }
-
-                artistMoreMenu(page)
             } else {
                 if isWide {
                     ShufflePill {
@@ -714,19 +668,6 @@ struct DetailView: View {
 
     /// An artist's overflow: the page's own actions, none of which belong in the
     /// top bar because the bar is about the page and this is about the artist.
-    private func artistMoreMenu(_ page: DetailPageModel) -> some View {
-        CircleMenuButton(label: "More actions") {
-            if let urlString = page.url, let url = URL(string: urlString) {
-                ShareLink(item: url) {
-                    Label("Share", systemImage: "square.and.arrow.up")
-                }
-                Link(destination: url) {
-                    Label("Open in YouTube Music", systemImage: "arrow.up.right.square")
-                }
-            }
-        }
-    }
-
     /// A release's overflow: the queue rows upstream's page-level sheet keeps
     /// (MainActivity.kt:3855, `fromCard = false` — play next and add to queue
     /// without taking over playback), the collection's download state, and
@@ -840,8 +781,53 @@ struct DetailView: View {
         .padding(.bottom, 12)
     }
 
-    private func artistStatsRow(page: DetailPageModel, tint: ArtworkPalette.PageTint) -> some View {
-        HStack(spacing: 8) {
+    /// "About the artist" / "About the album". An artist's section also holds
+    /// the subscriber and listener counts, so a page with no blurb still gets
+    /// it; the signature goes here only when the header could not show it.
+    @ViewBuilder
+    private func aboutSection(_ page: DetailPageModel, isArtist: Bool) -> some View {
+        let desc = page.description.flatMap { $0.isEmpty ? nil : $0 }
+        let hasStats = isArtist && (page.subscriberCountText != nil || page.monthlyListenerCount != nil)
+        let title = page.title.isEmpty ? initialTitle : page.title
+        let footerSignature = isArtist ? artistSignature.flatMap { $0.artistName == title ? nil : $0 } : nil
+        if kind(of: page) != .playlist, desc != nil || hasStats || footerSignature != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(isArtist ? "About the artist" : "About the album")
+                    .font(.title3.bold())
+                if let desc {
+                    Text(desc)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if hasStats {
+                    artistStatsRow(page: page)
+                        .padding(.top, 2)
+                }
+                if let signature = footerSignature {
+                    AsyncImage(url: signature.imageURL) { image in
+                        image.resizable()
+                            .renderingMode(.template)
+                            .scaledToFit()
+                            .foregroundStyle(.primary)
+                    } placeholder: {
+                        Color.clear
+                    }
+                    .frame(maxWidth: 260, maxHeight: 100, alignment: .leading)
+                    .accessibilityLabel("Artist signature for \(signature.artistName)")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.top, 28)
+        }
+    }
+
+    /// Upstream's `ArtistStatsRow`: the two counts stacked and left-aligned
+    /// with the About text above them. YouTube's count already says
+    /// "1.2M subscribers", so only the number is kept and the label re-said.
+    private func artistStatsRow(page: DetailPageModel) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             if let sub = page.subscriberCountText, !sub.isEmpty {
                 let text = sub.components(separatedBy: " ").first ?? sub
                 statChip(icon: "person.2.fill", text: "\(text) subscribers")
@@ -1135,7 +1121,13 @@ struct DetailView: View {
         let owned = page.playlistOwned == true && filter.isEmpty
 
         if kind(of: page) == .artist {
-            artistTopSongs(page, songs: songs, width: width, fallback: fallback)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Top songs")
+                    .font(.title3.bold())
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                artistTopSongs(page, songs: songs, width: width, fallback: fallback)
+            }
         } else if owned {
                 List {
                     ForEach(Array(songs.enumerated()), id: \.offset) { index, song in
@@ -1599,46 +1591,90 @@ private struct DetailSkeleton: View {
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let sleeve = isArtist
-                ? min(width / 0.95, geo.size.height * 0.55)
-                : (wide ? 240 : min(210, max(140, width * 0.5)))
             ScrollView {
-                VStack(spacing: 18) {
-                    SkeletonBlock(height: sleeve, cornerRadius: isArtist ? 0 : 12)
-                        .frame(width: isArtist ? width : sleeve)
-                        .padding(.top, wide ? 24 : 10)
-
-                    VStack(spacing: 10) {
-                        SkeletonBlock(height: 20)
-                            .frame(maxWidth: width * 0.6, alignment: .center)
-                        SkeletonBlock(height: 12)
-                            .frame(maxWidth: width * 0.35, alignment: .center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 24)
-
-                    HStack(spacing: 14) {
-                        if wide {
-                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 150)
-                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 150)
-                        } else {
-                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 92)
-                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 44)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-
-                    VStack(spacing: 6) {
-                        ForEach(0..<8, id: \.self) { _ in
-                            SkeletonSongRow()
-                                .padding(.horizontal, 24)
-                        }
-                    }
-                    .padding(.bottom, 22)
+                if isArtist {
+                    artist(width: width, height: geo.size.height)
+                } else {
+                    release(width: width)
                 }
             }
+            #if os(iOS)
+            .ignoresSafeArea(edges: isArtist ? .top : [])
+            #endif
+            .scrollDisabled(true)
         }
+        .accessibilityElement()
         .accessibilityLabel("Loading")
+    }
+
+    /// `artistHeader`'s box: the hero at its real height, the name and the
+    /// Shuffle / Play / Subscribe circles on its foot, then "Top songs".
+    private func artist(width: CGFloat, height: CGFloat) -> some View {
+        let artHeight = min(width / 0.95, height * 0.55)
+        return VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                SkeletonBlock(height: artHeight, cornerRadius: 0)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                VStack(spacing: 14) {
+                    SkeletonBlock(height: 30, cornerRadius: 8)
+                        .frame(width: min(width * 0.5, 260))
+                    HStack(spacing: 24) {
+                        Circle().fill(.quaternary).frame(width: 52, height: 52)
+                        Circle().fill(.quaternary).frame(width: 70, height: 70)
+                        Circle().fill(.quaternary).frame(width: 52, height: 52)
+                    }
+                }
+                .padding(.bottom, 12)
+            }
+            .frame(height: artHeight + 44)
+
+            VStack(alignment: .leading, spacing: 8) {
+                SkeletonBlock(height: 20, cornerRadius: 6).frame(width: 110)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                VStack(spacing: 0) {
+                    ForEach(0..<4, id: \.self) { _ in SkeletonSongRow() }
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// `releaseHeader`'s stack: the sleeve (`releaseSleeve`), title, credit and
+    /// info lines, and the action row as wide or narrow draws it.
+    private func release(width: CGFloat) -> some View {
+        let sleeve = wide ? 240 : min(210, max(140, width * 0.5))
+        return VStack(spacing: 14) {
+            SkeletonBlock(height: sleeve, cornerRadius: 12)
+                .frame(width: sleeve)
+            VStack(spacing: 8) {
+                SkeletonBlock(height: 22, cornerRadius: 6).frame(width: min(width * 0.55, 280))
+                SkeletonBlock(height: 16, cornerRadius: 5).frame(width: min(width * 0.35, 170))
+                SkeletonBlock(height: 11, cornerRadius: 4).frame(width: min(width * 0.45, 200))
+            }
+            HStack(spacing: 12) {
+                if wide {
+                    SkeletonBlock(height: 46, cornerRadius: 23).frame(width: 111)
+                    SkeletonBlock(height: 46, cornerRadius: 23).frame(width: 95)
+                } else {
+                    Circle().fill(.quaternary).frame(width: 46, height: 46)
+                    Circle().fill(.quaternary).frame(width: 46, height: 46)
+                }
+                Circle().fill(.quaternary).frame(width: 46, height: 46)
+                Circle().fill(.quaternary).frame(width: 46, height: 46)
+            }
+            .padding(.top, 6)
+            VStack(spacing: 0) {
+                ForEach(0..<8, id: \.self) { _ in SkeletonSongRow() }
+            }
+            .padding(.top, 8)
+        }
+        .frame(maxWidth: 860)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.top, wide ? 24 : 10)
     }
 }
 
@@ -1648,6 +1684,9 @@ private struct CircleIconButton: View {
     let icon: Image
     let label: String
     var size: CGFloat = 46
+    /// Upstream's artist-row look: a light veil with a hairline edge rather
+    /// than the flat grey disc.
+    var veiled: Bool = false
     var active: Bool = false
     var activeColor: Color? = nil
     var disabled: Bool = false
@@ -1656,7 +1695,12 @@ private struct CircleIconButton: View {
     var body: some View {
         Button(action: action) {
             Circle()
-                .fill(active ? (activeColor ?? .accentColor) : Color.primary.opacity(0.12))
+                .fill(active ? (activeColor ?? .accentColor) : Color.primary.opacity(veiled ? 0.10 : 0.12))
+                .overlay {
+                    if veiled {
+                        Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    }
+                }
                 .overlay {
                     icon
                         .renderingMode(.template)
@@ -1669,8 +1713,39 @@ private struct CircleIconButton: View {
         }
         .buttonStyle(.plain)
         .disabled(disabled)
+        .opacity(disabled ? 0.45 : 1)
         .accessibilityLabel(label)
         .help(label)
+    }
+}
+
+/// The artist page's Play: a filled circle with the glyph punched out of it,
+/// so the page shows through, as Apple's does (upstream `PlayCircle`, icon
+/// at 56% of the circle).
+private struct PlayCircle: View {
+    var isPlaying: Bool
+    var size: CGFloat = 70
+    var color: Color = .white
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().fill(color)
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size * 0.56 * 0.6, height: size * 0.56 * 0.6)
+                    .offset(x: isPlaying ? 0 : size * 0.03)
+                    .blendMode(.destinationOut)
+            }
+            .compositingGroup()
+            .frame(width: size, height: size)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isPlaying ? "Pause" : "Play")
+        .help(isPlaying ? "Pause" : "Play")
     }
 }
 

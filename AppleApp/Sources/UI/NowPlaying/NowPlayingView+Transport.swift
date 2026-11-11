@@ -225,10 +225,11 @@ extension NowPlayingView {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .scaledFont(size: 13, weight: .semibold)
+                .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(.white.opacity(0.14), in: Circle())
+                .frame(width: 34, height: 34)
+                .background(.white.opacity(0.18), in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .help("More")

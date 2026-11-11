@@ -142,7 +142,7 @@ private struct HomeFeedSkeleton: View {
     private var isList: Bool { viewType.uppercased() != "GRID" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 26) {
+        VStack(alignment: .leading, spacing: 28) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     RecentsSkeletonBlock(height: 22, cornerRadius: 6).frame(width: 112)
@@ -202,22 +202,10 @@ private struct HomeFeedSkeleton: View {
                 }
             }
             ForEach(0..<2, id: \.self) { shelf in
-                VStack(alignment: .leading, spacing: 10) {
-                    SkeletonBlock(height: 22, cornerRadius: 6).frame(width: shelf == 0 ? 140 : 110)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 14) {
-                            ForEach(0..<4, id: \.self) { _ in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    SkeletonBlock(height: 156, cornerRadius: 12).frame(width: 156)
-                                    SkeletonBlock(height: 14, cornerRadius: 4).frame(width: 118)
-                                    SkeletonBlock(height: 12, cornerRadius: 4).frame(width: 82)
-                                }
-                            }
-                        }
-                    }
-                }
+                SkeletonShelf(titleWidth: shelf == 0 ? 140 : 110, adaptive: true)
             }
         }
+        // The loaded feed's spacing (28), so the shelves land where these were.
         .padding(.horizontal, 24)
         .padding(.vertical, 20)
     }

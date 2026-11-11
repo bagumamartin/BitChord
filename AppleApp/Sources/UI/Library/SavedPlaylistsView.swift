@@ -34,7 +34,7 @@ struct SavedShelfView: View {
                     buttonTitle: "Sign In"
                 ) { auth.loginPresented = true }
             } else if loading {
-                ScrollView { FeedSkeleton() }
+                ScrollView { SkeletonGrid() }
             } else if let error, items.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
@@ -134,7 +134,7 @@ struct SavedPlaylistsView: View {
     var body: some View {
         Group {
             if loading && auth.signedIn {
-                ScrollView { FeedSkeleton() }
+                ScrollView { SkeletonGrid() }
             } else if let error, items.isEmpty, devicePlaylists.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchLibrary),

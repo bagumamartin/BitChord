@@ -42,7 +42,7 @@ struct LibraryLandingView: View {
                     // opening a picker that could not save anything.
                     shelfSection(FeedShelf(title: "Playlists", items: []))
                 } else if loading {
-                    FeedSkeleton()
+                    FeedSkeleton(padded: false)
                 } else if let error, shelves.isEmpty {
                     EmptyStateView(
                         icon: Image(.bchLibrary),

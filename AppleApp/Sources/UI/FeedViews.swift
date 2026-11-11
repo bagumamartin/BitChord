@@ -206,10 +206,97 @@ struct ShelfCarousel: View {
     /// than staying phone-sized. The sleeve *is* the card's width, so it is
     /// computed here instead of framing a fixed sleeve into a narrower slot,
     /// which is what let artwork spill over its neighbour.
-    private var cardSide: CGFloat {
+    private var cardSide: CGFloat { Self.cardSide(width: width, sizeClass: sizeClass) }
+
+    /// Shared with the loading skeletons, so a placeholder card is the size
+    /// the real one will be.
+    static func cardSide(width: CGFloat, sizeClass: UserInterfaceSizeClass?) -> CGFloat {
         guard sizeClass == .regular, width > 0 else { return Theme.Metrics.shelfCard }
         let quarter = (width - 3 * 14) / 4
         return min(240, max(Theme.Metrics.shelfCard, quarter.rounded(.down)))
+    }
+}
+
+/// A loading library grid, built with the same adaptive columns and
+/// `ShelfCardView` cell size the loaded grids use, under an optional section
+/// title, so the cards land where their placeholders were.
+struct SkeletonGrid: View {
+    var showsTitle = false
+    var count = 18
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if showsTitle {
+                SkeletonBlock(height: 22, cornerRadius: 6).frame(width: 140)
+                    .padding(.horizontal, 24)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 16)], spacing: 20) {
+                ForEach(0..<count, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 8) {
+                        SkeletonBlock(height: Theme.Metrics.shelfCard, cornerRadius: 12)
+                        SkeletonBlock(height: 14, cornerRadius: 4)
+                            .frame(width: Theme.Metrics.shelfCard * [0.74, 0.62, 0.8, 0.56][index % 4])
+                        SkeletonBlock(height: 12, cornerRadius: 4)
+                            .frame(width: Theme.Metrics.shelfCard * [0.5, 0.42, 0.55, 0.38][index % 4])
+                    }
+                    .frame(width: Theme.Metrics.shelfCard, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+        .padding(.vertical, 20)
+        .accessibilityElement()
+        .accessibilityLabel("Loading")
+    }
+}
+
+private extension View {
+    func wrappedInStillScroller(inset: CGFloat) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) { self }
+            .scrollDisabled(true)
+            .contentMargins(.horizontal, inset, for: .scrollContent)
+            .padding(.horizontal, -inset)
+    }
+}
+
+/// A loading shelf the shape of a `ShelfCarousel`: the same card side for the
+/// width it has, and as many cards as it takes to run off the edge, so the
+/// page does not change shape when the feed lands.
+struct SkeletonShelf: View {
+    var titleWidth: CGFloat = 140
+    var inset: CGFloat = 24
+    /// Home's `ShelfCarousel` widens its cards on a regular-width window; the
+    /// library shelves keep `ShelfCardView`'s fixed 160.
+    var adaptive = false
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @State private var width: CGFloat = 0
+
+    var body: some View {
+        let side = adaptive
+            ? ShelfCarousel.cardSide(width: width, sizeClass: sizeClass)
+            : Theme.Metrics.shelfCard
+        let count = width > 0 ? Int((width / (side + 14)).rounded(.up)) + 1 : 2
+        VStack(alignment: .leading, spacing: 10) {
+            SkeletonBlock(height: 22, cornerRadius: 6).frame(width: titleWidth)
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(0..<count, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 8) {
+                        SkeletonBlock(height: side, cornerRadius: 12)
+                        SkeletonBlock(height: 14, cornerRadius: 4)
+                            .frame(width: side * [0.74, 0.62, 0.8, 0.56][index % 4])
+                        SkeletonBlock(height: 12, cornerRadius: 4)
+                            .frame(width: side * [0.5, 0.42, 0.55, 0.38][index % 4])
+                    }
+                    .frame(width: side, alignment: .leading)
+                }
+            }
+            .padding(.vertical, 2)
+            // Inside a still scroll view, as `ShelfScroller` is, so the run
+            // can overflow to the window edge without widening the shelf.
+            .wrappedInStillScroller(inset: inset)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .accessibilityHidden(true)
     }
 }
 
@@ -485,31 +572,17 @@ struct SignInBanner: View {
 
 /// Upstream `feedSkeleton()` — shimmer shelves while the feed loads.
 struct FeedSkeleton: View {
+    /// False where the page already pads its content (the library landing).
+    var padded = true
+
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
-            ForEach(0..<3, id: \.self) { _ in
-                VStack(alignment: .leading, spacing: 10) {
-                    SkeletonBlock(height: 22, cornerRadius: 6)
-                        .frame(width: 140)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 14) {
-                            ForEach(0..<5, id: \.self) { _ in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    SkeletonBlock(height: 160, cornerRadius: 10)
-                                    SkeletonBlock(height: 14, cornerRadius: 4)
-                                        .frame(width: 120)
-                                    SkeletonBlock(height: 12, cornerRadius: 4)
-                                        .frame(width: 80)
-                                }
-                                .frame(width: 160)
-                            }
-                        }
-                    }
-                }
+            ForEach(0..<3, id: \.self) { index in
+                SkeletonShelf(titleWidth: [140, 110, 160][index])
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
+        .padding(.horizontal, padded ? 24 : 0)
+        .padding(.vertical, padded ? 20 : 0)
     }
 }
 

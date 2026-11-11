@@ -230,6 +230,15 @@ struct RootView: View {
             macInspector = .lyrics
             appModel.lyricsRevealRequested = false
         }
+        // An artist opened from the player's credit line is pushed on the
+        // window's browse stack, so back returns to the page it covered.
+        .onChange(of: appModel.pendingArtistPage) { _, destination in
+            guard case .detail(let browseId, let title) = destination else { return }
+            appModel.pendingArtistPage = nil
+            navigator.path.append(PushRoute(id: UUID()) {
+                AnyView(DetailView(browseId: browseId, initialTitle: title))
+            })
+        }
         #endif
         .preferredColorScheme(appModel.preferredScheme)
         .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
@@ -414,7 +423,15 @@ struct RootView: View {
             HStack(spacing: 0) {
                 // One stack for every row, bound to the window's history, so
                 // back and forward cover a page opened on any of them.
-                NavigationStack(path: Bindable(navigator).path) {
+                // While the player is up the stack is shown its root alone: a
+                // pushed page is hosted above the rest of the detail column,
+                // so it stayed on screen over the player, with the sidebar and
+                // titlebar already hidden and no way back. The window's history
+                // is untouched; the pages return when the player closes.
+                NavigationStack(path: Binding(
+                    get: { appModel.nowPlayingPresented ? [] : navigator.path },
+                    set: { if !appModel.nowPlayingPresented { navigator.path = $0 } }
+                )) {
                     macDetail
                         .modifier(MacPillInset())
                         .navigationDestination(for: PushRoute.self) { route in

@@ -395,6 +395,9 @@ final class AppModel {
     /// still being handled.
     var searchFocusTrigger = 0
     var pendingDetail: BrowseDestination?
+    /// An artist page to push on the Mac window's browse stack, so it is part
+    /// of back/forward history rather than a sheet over the window.
+    var pendingArtistPage: BrowseDestination?
     var playlistPicker: PlaylistPickerRequest?
     var downloadManagerPresented = false
     var replayPresented = false
@@ -500,6 +503,61 @@ final class AppModel {
     /// Remember a "not now", so the launch offer does not return on its own.
     func declineAutomixModels() {
         PlatformSettings.shared.putBoolean(key: "automix_models_prompt_dismissed_v2", value: true)
+    }
+
+    /// Open one credited artist's page from a player credit line.
+    ///
+    /// A track carries only its first artist's browse id, so every other name
+    /// is looked up among YouTube Music's artists and opened only on an exact
+    /// name match; a near miss would open somebody else's page, so it falls
+    /// back to a search for the name instead.
+    @MainActor
+    func openArtist(named name: String, knownId: String?) {
+        nowPlayingPresented = false
+        Task { @MainActor in
+            var browseId = knownId
+            if browseId == nil {
+                let hits = (try? await InnertubeSearch.shared.search(name, scope: "artists")) ?? []
+                browseId = Self.artistMatch(name, in: hits)?.browseId
+            }
+            guard let browseId else {
+                pendingSearchQuery = name
+                requestedTab = .search
+                focusSearch = true
+                return
+            }
+            await showPage(.detail(browseId: browseId, title: name))
+        }
+    }
+
+    /// Open a browse page (an album from the player's title) over whatever
+    /// the player covered.
+    @MainActor
+    func openPage(browseId: String, title: String) {
+        nowPlayingPresented = false
+        Task { @MainActor in await showPage(.detail(browseId: browseId, title: title)) }
+    }
+
+    @MainActor
+    private func showPage(_ destination: BrowseDestination) async {
+        #if os(macOS)
+        pendingArtistPage = destination
+        #else
+        // The player is a full-screen cover; a sheet asked for while it is
+        // still leaving is dropped, so wait out the dismissal.
+        try? await Task.sleep(for: .milliseconds(450))
+        pendingDetail = destination
+        #endif
+    }
+
+    static func artistMatch(_ name: String, in hits: [SearchHitDTO]) -> SearchHitDTO? {
+        let wanted = name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .trimmingCharacters(in: .whitespaces)
+        return hits.first { hit in
+            guard hit.isBrowse, let id = hit.browseId, id.hasPrefix("UC") else { return false }
+            return hit.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+                .trimmingCharacters(in: .whitespaces) == wanted
+        }
     }
 
     /// Canonical tabs (UI spec §2). macOS Library sub-destinations live as

@@ -30,12 +30,15 @@ struct GlassCircleButton: View {
                 if let icon {
                     Image(icon).resizable().scaledToFit().frame(width: 15, height: 15)
                 } else if let system {
-                    Image(systemName: system).scaledFont(size: 12, weight: .semibold)
+                    Image(systemName: system).scaledFont(size: 15, weight: .semibold)
                 }
             }
             .foregroundStyle(.white)
             .frame(width: 34, height: 34)
-            .background(.white.opacity(selected ? 0.28 : 0.14), in: Circle())
+            // Upstream `CircleGlyph`'s disc: 18% white, 34% when active.
+            .background(.white.opacity(selected ? 0.34 : 0.18), in: Circle())
+            .contentShape(Circle())
+            .animation(.easeInOut(duration: 0.18), value: selected)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)

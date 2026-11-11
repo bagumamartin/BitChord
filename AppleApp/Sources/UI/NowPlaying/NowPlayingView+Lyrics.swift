@@ -39,6 +39,7 @@ extension NowPlayingView {
                     .lineLimit(1)
                 ArtistCreditText(
                     credit: controller.current?.artist ?? "",
+                    artistId: controller.current?.artistId,
                     font: .subheadline,
                     color: .white.opacity(0.7)
                 )

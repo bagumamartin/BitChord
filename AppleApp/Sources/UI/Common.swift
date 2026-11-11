@@ -405,7 +405,9 @@ struct SkeletonSongRow: View {
                     .frame(maxWidth: 128, alignment: .leading)
             }
         }
-        .padding(.vertical, 3)
+        // SongRow's own padding around its 44pt art: 52pt a row.
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityHidden(true)
     }
 }
@@ -420,7 +422,7 @@ struct SkeletonRows: View {
     var showArt = true
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 0) {
             ForEach(0..<max(0, count), id: \.self) { _ in
                 SkeletonSongRow(showArt: showArt)
             }
@@ -565,19 +567,23 @@ struct PlayingBars: View {
     }
 }
 
-/// A credit line whose artist names each open their own search.
+/// A credit line whose artist names each open their own artist page.
 ///
-/// A track can be credited to several artists and the player used to draw them as
-/// one string with nothing to press. The player only carries the *first* artist's
-/// browse id, so each name opens a search for itself instead — one tap from that
-/// artist's page, and it works for the second and third name too.
+/// The track carries only its *first* artist's browse id; that name opens the
+/// page directly and every other name is looked up by exact name (see
+/// `AppModel.openArtist`), falling back to a search when nothing matches.
 struct ArtistCreditText: View {
     let credit: String
+    /// The first credited artist's browse id, when the track has one.
+    var artistId: String? = nil
     var font: Font
     var color: Color
     /// A trailing, unlinked part of the line — the album, in the deck's
     /// "artist — album" credit.
     var suffix: String? = nil
+    /// Crawl when too long (upstream's `ArtistCreditsMarquee`) rather than
+    /// end in an ellipsis; nil keeps a plain one-line truncation.
+    var marquee: (enabled: Bool, startDelay: Double)? = nil
     @Environment(AppModel.self) private var appModel
 
     private var names: [String] {
@@ -587,23 +593,28 @@ struct ArtistCreditText: View {
     }
 
     var body: some View {
+        if let marquee {
+            Marquee(enabled: marquee.enabled, startDelay: marquee.startDelay) { line }
+        } else {
+            line.lineLimit(1)
+        }
+    }
+
+    private var line: some View {
         Text(attributed)
             .font(font)
             .foregroundStyle(color)
-            .lineLimit(1)
+            // Names are drawn in the line's own colour, as upstream draws them:
+            // a tappable credit, not a row of accent-blue links.
+            .tint(color)
             .environment(\.openURL, OpenURLAction { url in
+                let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
                 guard url.scheme == "bitchord", url.host == "artist",
-                      let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                        .queryItems?.first(where: { $0.name == "name" })?.value else {
+                      let name = items?.first(where: { $0.name == "name" })?.value else {
                     return .systemAction
                 }
-                // The player covers the window and the search tab behind it,
-                // so the destination has to be shown: dismiss first, then open
-                // the tab the search lands in.
-                appModel.nowPlayingPresented = false
-                appModel.pendingSearchQuery = name
-                appModel.requestedTab = .search
-                appModel.focusSearch = true
+                let index = items?.first(where: { $0.name == "index" })?.value.flatMap(Int.init) ?? 0
+                appModel.openArtist(named: name, knownId: index == 0 ? artistId : nil)
                 return .handled
             })
     }
@@ -616,7 +627,10 @@ struct ArtistCreditText: View {
             var components = URLComponents()
             components.scheme = "bitchord"
             components.host = "artist"
-            components.queryItems = [URLQueryItem(name: "name", value: name)]
+            components.queryItems = [
+                URLQueryItem(name: "name", value: name),
+                URLQueryItem(name: "index", value: String(index))
+            ]
             piece.link = components.url
             out += piece
             if index < parts.count - 1 { out += AttributedString(", ") }

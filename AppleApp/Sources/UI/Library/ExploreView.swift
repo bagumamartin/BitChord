@@ -221,8 +221,12 @@ private struct MoodTile: View {
 /// The loading tile: the real aspect, the real corner, the shared pulse.
 private struct MoodTileSkeleton: View {
     var body: some View {
-        SkeletonBlock(height: 400, cornerRadius: 18)
+        // The tile's own shape: a SkeletonBlock fixes its height, which beat
+        // the aspect ratio and stood every placeholder 400pt tall.
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(.quaternary)
             .aspectRatio(1.72, contentMode: .fit)
+            .accessibilityHidden(true)
     }
 }
 

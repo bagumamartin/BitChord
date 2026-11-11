@@ -15,30 +15,56 @@ import AppKit
 extension NowPlayingView {
     /// Title and artist, with the like and the overflow menu beside them.
     var creditsRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(controller.current?.title ?? "Nothing playing")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .shadow(color: .black.opacity(0.45), radius: 6, y: 1)
+        // Upstream's portrait credits: title and artist at the same 20pt, the
+        // title bold and white, the artist medium at 55% white, each crawling
+        // when it overflows (the artist a beat behind a crawling title), and
+        // the star and the menu beside them as two 34pt glyph discs.
+        let current = controller.current
+        let scrolls = pane == .main
+        let artistColor = Color.white.opacity(0.55)
+        return HStack(alignment: .center, spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if current?.isExplicit == true {
+                        ExplicitMark(color: artistColor)
+                    }
+                    Marquee(enabled: scrolls, onOverflowChange: { titleCrawls = $0 }) {
+                        Text(current?.title ?? "Nothing playing")
+                            .font(.system(size: 20, weight: .bold))
+                            .tracking(-0.2)
+                            .foregroundStyle(.white)
+                    }
+                    // Only a track YouTube gave an album id for leads anywhere.
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard let albumId = current?.albumId else { return }
+                        appModel.openPage(browseId: albumId, title: current?.albumName ?? "Album")
+                    }
+                    .accessibilityAddTraits(current?.albumId != nil ? .isButton : [])
+                }
                 ArtistCreditText(
-                    credit: controller.current?.artist ?? "",
-                    font: .subheadline,
-                    color: .white.opacity(0.75),
-                    suffix: albumSuffix
+                    credit: current?.artist ?? "",
+                    artistId: current?.artistId,
+                    font: .system(size: 20, weight: .medium),
+                    color: artistColor,
+                    marquee: (scrolls, titleCrawls ? 3 : 0)
                 )
-                .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
             }
-            Spacer(minLength: 8)
-            if auth.signedIn, controller.current?.videoId != nil {
+            .id(current?.id)
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.3), value: current?.id)
+            Spacer(minLength: 10)
+            if auth.signedIn, current?.videoId != nil {
                 GlassCircleButton(
-                    icon: controller.isLiked ? .bchHeartFilled : .bchHeart,
-                    label: controller.isLiked ? "Remove Like" : "Like"
+                    system: controller.isLiked ? "star.fill" : "star",
+                    selected: controller.isLiked,
+                    label: controller.isLiked ? "Remove from Liked" : "Like"
                 ) {
+                    Haptics.play(.tap)
                     controller.toggleLike()
                 }
                 .help(controller.isLiked ? "Remove from Liked Music" : "Like")
+                .padding(.trailing, 8)
             }
             moreMenu
         }

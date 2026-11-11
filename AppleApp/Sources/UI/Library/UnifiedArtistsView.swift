@@ -32,7 +32,7 @@ struct UnifiedArtistsView: View {
     var body: some View {
         Group {
             if auth.signedIn && loading {
-                ScrollView { FeedSkeleton() }
+                ScrollView { SkeletonGrid(showsTitle: true) }
             } else if let error, !hasDevice {
                 EmptyStateView(
                     icon: Image(.bchLibrary),

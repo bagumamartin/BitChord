@@ -52,6 +52,8 @@ struct NowPlayingView: View {
     /// three-dot becomes the way in (and the way out) of picking lines for a
     /// share card while the lyrics pane is up.
     @State var sharePicking = false
+    /// Whether the title is crawling, so the artist line waits a beat behind it.
+    @State var titleCrawls = false
     /// The offset, held here so a change re-renders the lyrics without the sheet
     /// being open. The notification is the signal; this is the value it carries.
     @State var lyricsOffsetMs: Int32 = LyricsOffsetBridge.offsetMs()
@@ -181,23 +183,6 @@ struct NowPlayingView: View {
         }
     }
     #endif
-
-    /// Artist and album on one line, whichever of the two there is.
-    ///
-    /// One line rather than two because the deck has room for one: a title on
-    /// two lines already, and a second line under it pushes the scrubber down and
-    /// the deck is supposed to be the same height whatever is playing.
-    /// The album, as the tail of the credit line: " — Album", or nothing.
-    ///
-    /// Kept off [ArtistCreditText]'s links deliberately. The album is named here
-    /// rather than linked because the deck has no album destination that the
-    /// artist links do not already dominate.
-    var albumSuffix: String? {
-        let album = controller.current?.albumName ?? ""
-        let artist = controller.current?.artist ?? ""
-        if album.isEmpty { return nil }
-        return artist.isEmpty ? album : " — \(album)"
-    }
 
     /// Upstream `AppSettings.fullBleedArtwork`: the portrait sleeve runs as a
     /// full-bleed banner rather than a card.
