@@ -6,6 +6,7 @@ import BitChordShared
 /// Stable identifiers for the window toolbar's own controls, so toolbar
 /// customisation and SwiftUI's own diffing keep track of them.
 enum MacToolbarItemID {
+    static let searchAction = "bitchord.searchAction"
     static let searchField = "bitchord.searchField"
     static let searchSource = "bitchord.searchSource"
     static let account = "bitchord.account"
@@ -38,7 +39,14 @@ extension EnvironmentValues {
 
 /// The main window's trailing controls: account, then Downloads.
 struct MacWindowControls: ToolbarContent {
+    var includesSearchAction = true
+
     var body: some ToolbarContent {
+        if includesSearchAction {
+            ToolbarItem(id: MacToolbarItemID.searchAction, placement: .primaryAction) {
+                TopBarSearchButton()
+            }
+        }
         ToolbarItem(id: MacToolbarItemID.account, placement: .primaryAction) {
             MacAccountToolbarButton()
         }
@@ -419,6 +427,8 @@ private struct MacLyricsInspector: View {
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
                 alignedLocally: controller.lyricsAlignedLocally,
+                alignmentState: controller.lyricsAlignmentState,
+                onRetryAlignment: { controller.retryLyricsAlignment() },
                 onChooseSource: { showProviderPicker = true },
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,

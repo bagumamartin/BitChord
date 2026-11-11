@@ -52,7 +52,16 @@ extension PlaybackController {
         // skip promotes on reply and flips the index itself, so a handoff
         // that follows it (or one from a superseded arm) must not advance
         // the queue a second time.
-        if repeatMode != .one {
+        if repeatMode == .one {
+            guard PlaybackHandoffPolicy.acceptsRepeatOne(
+                title: info.title, artist: info.artist,
+                sourceIsArmed: sourceHeadersByPath[info.source] != nil,
+                currentTitle: current?.title, currentArtist: current?.artist
+            ) else {
+                NSLog("[BitChord] ignoring repeat-one handoff for superseded selection %@ — %@", info.title, info.artist)
+                return
+            }
+        } else {
             if let next = nextEntry, info.title == next.title, info.artist == next.artist,
                sourceHeadersByPath[info.source] != nil {
                 // The expected advance — fall through to the index logic.

@@ -896,6 +896,7 @@ class InnerTubeExtractor internal constructor(
                         formats = allFormats.filter(PlayerResponse.StreamingData.Format::isAudio),
                         audioQuality = audioQuality,
                         requireUrl = false,
+                        maxAudioBitrateBps = hints.maxAudioBitrateBps,
                     )
                 if (audioFormat == null) {
                     logger.d(TAG, "SABR response missing audio format", details = mapOf("client" to result.clientName))
@@ -1070,7 +1071,7 @@ class InnerTubeExtractor internal constructor(
                         !it.url.isNullOrBlank() &&
                         (it.itag in directAudioItags)
                 }
-            val directFastPathCandidate = selectBestAudioFormat(directAudioFormats, audioQuality)
+            val directFastPathCandidate = selectBestAudioFormat(directAudioFormats, audioQuality, maxAudioBitrateBps = hints.maxAudioBitrateBps)
             val bestAvailableAudioFormat =
                 selectBestAudioFormat(
                     allFormats.filter { format ->
@@ -1083,6 +1084,7 @@ class InnerTubeExtractor internal constructor(
                     },
                     audioQuality,
                     requireUrl = false,
+                    maxAudioBitrateBps = hints.maxAudioBitrateBps,
                 )
             val directAudioIsBest = directFastPathCandidate?.itag == bestAvailableAudioFormat?.itag
             val wantVideo = hints.wantVideo
@@ -1201,7 +1203,7 @@ class InnerTubeExtractor internal constructor(
 
             val cipherStart = Clock.System.now().toEpochMilliseconds()
             val rawAudioFormats = allFormats.filter { it.width == null }
-            val preferredRawAudioFormat = selectBestAudioFormat(rawAudioFormats, audioQuality, requireUrl = false)
+            val preferredRawAudioFormat = selectBestAudioFormat(rawAudioFormats, audioQuality, requireUrl = false, maxAudioBitrateBps = hints.maxAudioBitrateBps)
             val audioFormatsForCipher = preferredRawAudioFormat?.let { listOf(it) } ?: rawAudioFormats
             val rawVideoFormats = if (hints.wantVideo) preferredVideoFormats(streamingData, requireUrl = false) else emptyList()
             val preferredRawVideoFormat =
@@ -1253,7 +1255,7 @@ class InnerTubeExtractor internal constructor(
             var directUrlAudioFormats = usableAudioFormats.filter { it.itag in directAudioItags }
             var selectionPool =
                 directUrlAudioFormats.ifEmpty { usableAudioFormats }
-            var audioFormat = selectBestAudioFormat(selectionPool, audioQuality)
+            var audioFormat = selectBestAudioFormat(selectionPool, audioQuality, maxAudioBitrateBps = hints.maxAudioBitrateBps)
 
             if (audioFormat == null && audioFormatsForCipher.size != rawAudioFormats.size) {
                 val fallbackCipherStart = Clock.System.now().toEpochMilliseconds()
@@ -1277,7 +1279,7 @@ class InnerTubeExtractor internal constructor(
                 directUrlAudioFormats = usableAudioFormats.filter { it.itag in directAudioItags }
                 selectionPool =
                     directUrlAudioFormats.ifEmpty { usableAudioFormats }
-                audioFormat = selectBestAudioFormat(selectionPool, audioQuality)
+                audioFormat = selectBestAudioFormat(selectionPool, audioQuality, maxAudioBitrateBps = hints.maxAudioBitrateBps)
             }
 
             if (audioFormat == null) {

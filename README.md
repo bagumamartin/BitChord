@@ -51,6 +51,8 @@ Both installers are on the [latest release](https://github.com/bagumamartin/BitC
 - **Downloads** for offline listening, with per-song progress, and covers kept for offline use.
 
 ### Sound
+- Choose a preferred quality in **Settings → Sound & Quality → Source Quality**, separately for Wi-Fi and mobile data. **Highest Available** prefers lossless and Hi-Res from enabled sources, with fallback when unavailable. The same page compares the requested quality with the current track's decoded format. Downloads have a separate quality setting under **Downloads & Storage**.
+- **Low** limits new streams to 64 kbps and **Medium** to 128 kbps, using known formats within the cap. Already saved files keep their format. **Apply to Current Track** requests a fresh stream at the current position and preserves play/pause intent.
 - A native **Rust playback engine** with gapless playback, crossfade, an equalizer, and audio-route information.
 - **Lossless** streams when a configured source provides them, and **Dolby Atmos** through Apple's renderer for supported source streams.
 - Spatial processing, and on macOS, **bit-perfect output** when the selected DAC and the source format allow it.
@@ -61,6 +63,7 @@ Both installers are on the [latest release](https://github.com/bagumamartin/BitC
 
 ### Lyrics
 - Lyrics from several providers, **word-synced** where a source supplies them, with an Apple-style animation.
+- Local alignment can add missing word timings using on-device Speech recognition. The lyrics pane explains permission, language/model availability, partial matches and failures; **Retry** can request permission and rerun alignment without replacing the provider's text.
 
 ### Made for Apple platforms
 - **SwiftUI** on Mac, iPhone and iPad, with the system's adaptable sidebar on iPad, back and forward history, and widgets.

@@ -6,8 +6,12 @@ public fun selectBestAudioFormat(
     formats: List<Format>,
     audioQuality: AudioQuality = AudioQuality.AUTO,
     requireUrl: Boolean = true,
+    maxAudioBitrateBps: Int? = null,
 ): Format? {
-    val validFormats = if (requireUrl) formats.filter { !it.url.isNullOrBlank() } else formats
+    val validFormats = formats.filter { format ->
+        (!requireUrl || !format.url.isNullOrBlank()) &&
+            (maxAudioBitrateBps == null || (format.bitrate > 0 && format.bitrate <= maxAudioBitrateBps))
+    }
     if (validFormats.isEmpty()) return null
     return when (audioQuality) {
         AudioQuality.LOW -> {

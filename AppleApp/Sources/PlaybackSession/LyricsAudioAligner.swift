@@ -36,28 +36,38 @@ enum LyricsAudioAligner {
     private static let maximumUnavailableRetries = 30
     private static let minimumProgressSeconds = 0.75
 
-    /// Returns true if at least one line received audio-derived word timings.
+    /// Returns the final outcome and reports useful progress as chunks finish.
     @discardableResult
     static func align(
         lines: [LyricLineDto],
         durationSeconds: Double,
         decode: @escaping Decode,
+        allowPermissionRequest: Bool = false,
+        onState: @escaping @MainActor (LyricsAlignmentState) -> Void,
         onUpdate: @escaping Update
-    ) async -> Bool {
+    ) async -> LyricsAlignmentState {
         guard durationSeconds > 0,
-              lines.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-              await requestAuthorization()
-        else { return false }
+              lines.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        else { return .audioUnavailable }
+        guard await hasSpeechAuthorization(allowRequest: allowPermissionRequest) else { return .permissionNeeded }
 
         let phrases = lines.map(\.text).filter { !$0.isEmpty }.prefix(100)
-        guard let locale = recognizerLocale(for: phrases.joined(separator: " ")),
-              let recognizer = SFSpeechRecognizer(locale: locale),
-              recognizer.isAvailable,
-              recognizer.supportsOnDeviceRecognition
-        else {
-            NSLog("[BitChord] local lyric alignment unavailable for this language/device")
-            return false
+        let detected = detectedLanguage(for: phrases.joined(separator: " "))
+        let localeCandidates = LyricsLocaleCandidates.ordered(
+            detectedLanguages: detected.map { [$0] } ?? [],
+            preferredIdentifiers: Locale.preferredLanguages,
+            supportedIdentifiers: SFSpeechRecognizer.supportedLocales().map(\.identifier)
+        )
+        guard !localeCandidates.isEmpty else { return .languageUnavailable }
+        var chosenRecognizer: SFSpeechRecognizer?
+        for identifier in localeCandidates {
+            guard let candidate = SFSpeechRecognizer(locale: Locale(identifier: identifier)),
+                  candidate.isAvailable, candidate.supportsOnDeviceRecognition else { continue }
+            chosenRecognizer = candidate
+            break
         }
+        guard let recognizer = chosenRecognizer else { return .deviceUnavailable }
+        onState(.analyzing)
 
         var observations: [LyricWordObservation] = []
         var alignedLines = lines
@@ -65,9 +75,10 @@ enum LyricsAudioAligner {
         var startSeconds = 0.0
         var alignedAtLeastOneLine = false
         var noAudioRetries = 0
+        var hadRecognitionError = false
 
         while startSeconds < durationSeconds {
-            if Task.isCancelled { return alignedAtLeastOneLine }
+            if Task.isCancelled { return alignedAtLeastOneLine ? .partial : .noMatch }
             let requestedDuration = min(chunkSeconds, durationSeconds - startSeconds)
             let region = await Task.detached(priority: .utility) {
                 decode(startSeconds, requestedDuration)
@@ -115,10 +126,12 @@ enum LyricsAudioAligner {
                         alignedAtLeastOneLine = true
                         alignedLines = updated
                         onUpdate(updated)
+                        onState(updated.contains(where: { !$0.isGap && $0.words.isEmpty }) ? .partial : .complete)
                     }
                 } catch is CancellationError {
-                    return alignedAtLeastOneLine
+                    return alignedAtLeastOneLine ? .partial : .failed
                 } catch {
+                    hadRecognitionError = true
                     NSLog("[BitChord] local lyric recognition chunk at %.1fs failed: %@",
                           startSeconds, String(describing: error))
                 }
@@ -132,14 +145,24 @@ enum LyricsAudioAligner {
             guard nextStart > startSeconds + 0.05 else { break }
             startSeconds = nextStart
         }
-        return alignedAtLeastOneLine
+        if alignedAtLeastOneLine {
+            return alignedLines.contains(where: { !$0.isGap && $0.words.isEmpty }) ? .partial : .complete
+        }
+        if noAudioRetries > 0 { return .audioUnavailable }
+        return hadRecognitionError ? .failed : .noMatch
     }
 
-    private static func requestAuthorization() async -> Bool {
+    private static func detectedLanguage(for text: String) -> String? {
+        let languageRecognizer = NLLanguageRecognizer()
+        languageRecognizer.processString(text)
+        return languageRecognizer.dominantLanguage?.rawValue.lowercased()
+    }
+
+    private static func hasSpeechAuthorization(allowRequest: Bool) async -> Bool {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:
             return true
-        case .notDetermined:
+        case .notDetermined where allowRequest:
             return await withCheckedContinuation { continuation in
                 SFSpeechRecognizer.requestAuthorization { status in
                     continuation.resume(returning: status == .authorized)
@@ -148,37 +171,6 @@ enum LyricsAudioAligner {
         default:
             return false
         }
-    }
-
-    private static func recognizerLocale(for text: String) -> Locale? {
-        let languageRecognizer = NLLanguageRecognizer()
-        languageRecognizer.processString(text)
-        let detectedLanguage = languageRecognizer.dominantLanguage?.rawValue.lowercased()
-        let preferredLanguage = Locale.preferredLanguages.first
-        let locales = SFSpeechRecognizer.supportedLocales()
-
-        if let detectedLanguage,
-           let match = locales.first(where: {
-               languageCode(for: $0) == detectedLanguage
-           }) {
-            return match
-        }
-        if let preferredLanguage,
-           let match = locales.first(where: {
-               $0.identifier.replacingOccurrences(of: "_", with: "-")
-                   .caseInsensitiveCompare(preferredLanguage.replacingOccurrences(of: "_", with: "-")) == .orderedSame
-           }) {
-            return match
-        }
-        return locales.first(where: { languageCode(for: $0) == "en" })
-    }
-
-    private static func languageCode(for locale: Locale) -> String {
-        locale.identifier
-            .split(whereSeparator: { $0 == "_" || $0 == "-" })
-            .first
-            .map(String.init)?
-            .lowercased() ?? ""
     }
 
     private static func recognize(

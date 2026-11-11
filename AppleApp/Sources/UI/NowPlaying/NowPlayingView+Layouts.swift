@@ -75,6 +75,13 @@ extension NowPlayingView {
                     .animation(isIPad ? .easeInOut(duration: 0.22) : nil, value: pane)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                TopBarSearchButton()
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+                    .padding(.top, isIPad ? 12 : 52)
+                    .padding(.trailing, 16)
+            }
             // Full-screen covers have no swipe-to-dismiss of their own, so the
             // iPad cover gets Music's treatment: a grabber pill top-center
             // plus a top-edge downward drag. The iPhone sheet keeps its

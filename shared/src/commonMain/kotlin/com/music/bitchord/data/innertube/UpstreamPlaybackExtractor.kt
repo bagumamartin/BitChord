@@ -261,7 +261,12 @@ internal object UpstreamPlaybackExtractor {
         val session = current()
         val stream = session.extractor.extract(
             videoId = videoId,
-            hints = ContentHints(wantVideo = false)
+            hints = ContentHints(
+                wantVideo = false,
+                maxAudioBitrateBps = maxKbps.takeIf { it < Int.MAX_VALUE }?.let {
+                    (it.toLong() * 1_000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                },
+            )
                 .withStreamCapabilities(allowHls = false, allowSabr = false, allowBoundedRange = true),
             excludedClients = excluded.load().filter { (key, at) ->
                 key.startsWith("${session.generation}:$videoId:") && at.elapsedNow() < 5.minutes

@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 class AudioQualityParityTest {
     @Test
     fun stream_rungs_gate_sources_like_upstream() {
-        assertEquals(Int.MAX_VALUE, AudioQuality.MEDIUM.maxKbps)
+        assertEquals(128, AudioQuality.MEDIUM.maxKbps)
         assertTrue(AudioQuality.LOW.permits(SourceKind.YOUTUBE))
         assertFalse(AudioQuality.LOW.permits(SourceKind.JIOSAAVN))
         assertFalse(AudioQuality.MEDIUM.permits(SourceKind.ADDON))

@@ -1,4 +1,5 @@
 import SwiftUI
+import BitChordShared
 
 /// A page pushed from a browse view, as a value the Mac's window history can
 /// hold and push again.
@@ -19,6 +20,29 @@ extension EnvironmentValues {
     /// True inside the Mac's one browse stack, where a page's own stack would
     /// nest inside it and its pushes would bypass the window's history.
     @Entry var inBrowseStack = false
+}
+
+/// Search remains one tap away from every browsing tab, including when the
+/// tab bar is hidden by the iPad search field.
+struct TopBarSearchButton: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        Button {
+            appModel.nowPlayingPresented = false
+            appModel.requestedTab = .search
+            appModel.focusSearch = true
+            appModel.searchFocusTrigger &+= 1
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .help("Search")
+        .accessibilityLabel("Search")
+    }
 }
 
 /// A browse page's navigation stack: its own on iOS, the window's on the Mac.

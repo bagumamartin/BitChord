@@ -104,16 +104,16 @@ struct AudioQualityOption: Identifiable {
     let detail: String
 
     static let stream: [AudioQualityOption] = [
-        .init(id: "LOW", title: "Low", detail: "64 kbps · uses the least data"),
-        .init(id: "MEDIUM", title: "Medium", detail: "Compressed audio · balances data use and quality"),
-        .init(id: "HIGH", title: "High", detail: "High-quality audio from enabled sources · YouTube fallback"),
-        .init(id: "LOSSLESS", title: "Lossless", detail: "Lossless and Hi-Res from sources that supply them"),
+        .init(id: "LOW", title: "Low", detail: String(localized: "Up to 64 kbps · about 29 MB per hour")),
+        .init(id: "MEDIUM", title: "Medium", detail: String(localized: "Up to 128 kbps · about 58 MB per hour")),
+        .init(id: "HIGH", title: "High", detail: String(localized: "Best compressed audio from enabled sources · YouTube fallback")),
+        .init(id: "LOSSLESS", title: String(localized: "Highest Available"), detail: String(localized: "Prefer lossless and Hi-Res · fall back to available audio")),
     ]
 
     static let download: [AudioQualityOption] = [
         .init(id: "STANDARD", title: "Standard", detail: "128 kbps AAC"),
         .init(id: "HIGH", title: "High", detail: "Best AAC the source will give"),
-        .init(id: "LOSSLESS", title: "Lossless", detail: "Keeps FLAC when a source has it"),
+        .init(id: "LOSSLESS", title: String(localized: "Highest Available"), detail: String(localized: "Keeps lossless when available · otherwise saves the available format")),
     ]
 
     static func label(_ id: String, in options: [AudioQualityOption]) -> String {

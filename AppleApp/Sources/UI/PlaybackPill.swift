@@ -77,7 +77,7 @@ struct PlaybackPill: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(controller.current?.title ?? "Not Playing"), \(controller.current?.artist ?? "")")
+            .accessibilityLabel(miniPlayerAccessibilityLabel)
             .accessibilityHint("Opens Now Playing")
 
             if isRegularWidth {
@@ -177,10 +177,17 @@ struct PlaybackPill: View {
                 .disabled(!controller.canPlayPrevious)
 
                 if controller.isBuffering {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 32, height: 32)
-                        .help("Loading")
+                    Button {
+                        controller.togglePlayPause()
+                    } label: {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 32, height: 32)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Pause playback while loading")
+                    .accessibilityLabel("Pause playback while loading")
                 } else {
                     pillButton(
                         controller.isPlaying ? "Pause" : "Play",
@@ -344,10 +351,18 @@ struct PlaybackPill: View {
 
     private var info: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(controller.current?.title ?? "Not Playing")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(controller.current == nil ? .secondary : .primary)
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                Text(controller.current?.title ?? "Not Playing")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(controller.current == nil ? .secondary : .primary)
+                    .lineLimit(1)
+                if controller.current?.videoId != nil {
+                    Image(systemName: controller.isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(controller.isLiked ? Color.pink : Color.secondary.opacity(0.7))
+                        .accessibilityHidden(true)
+                }
+            }
             // Inline there is room for the title alone, as in Music.
             if !inline {
                 Text(controller.current?.artist ?? "Music you start appears here")
@@ -356,6 +371,12 @@ struct PlaybackPill: View {
                     .lineLimit(1)
             }
         }
+    }
+
+    private var miniPlayerAccessibilityLabel: String {
+        var parts = [controller.current?.title ?? "Not Playing", controller.current?.artist ?? ""]
+        if controller.current?.videoId != nil { parts.append(controller.isLiked ? "Liked" : "Not liked") }
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     // MARK: - The party

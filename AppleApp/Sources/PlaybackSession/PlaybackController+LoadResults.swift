@@ -125,7 +125,8 @@ extension PlaybackController {
     /// Legacy cached WebM files can lack both container and saved duration.
     /// Repair metadata after playback starts, without delaying cached/offline audio.
     private func repairMissingDuration(entry: QueueEntry, info: TrackInfoRec) {
-        guard duration <= 0, let videoId = entry.videoId else { return }
+        guard duration <= 0, !OfflinePlaybackPolicy.isEnabled,
+              let videoId = entry.videoId else { return }
         let generation = playGeneration
         let ceiling = ResolvePrefs.current().maxKbps
         durationRepairTask?.cancel()
@@ -158,7 +159,10 @@ extension PlaybackController {
         // A song this player moved to on its own is stepped over, not stopped
         // on: upstream's skipPastUnplayable, reached here only after the whole
         // recovery ladder in the resolver has already run.
-        if automaticLoadEntryId == entry.id, state == .buffering, automaticSkips < 3,
+        if OfflinePlaybackSourcePolicy.shouldAutoSkipFailedTrack(
+                offlineEnabled: OfflinePlaybackPolicy.isEnabled
+           ),
+           automaticLoadEntryId == entry.id, state == .buffering, automaticSkips < 3,
            markUnplayable(entry, after: error),
            let next = nextPlayableIndex(after: playingIndex) {
             automaticSkips += 1
@@ -172,6 +176,9 @@ extension PlaybackController {
         }
         automaticLoadEntryId = nil
         lastError = "Couldn't play “\(entry.title)” — \(error.localizedDescription)"
+        if current?.id == entry.id {
+            restoredStart = (entry.id, max(0, position))
+        }
         // Somebody (pause, another load, sleep, interruption) owns the
         // transport now; their state stands and only the message is new.
         // Tearing the engine down here would stop whatever they started.

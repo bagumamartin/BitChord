@@ -251,19 +251,19 @@ object AccountStore {
 
     private fun save(all: List<GoogleAccountSession>): Boolean {
         if (all.isEmpty()) {
-            PlatformSettings.putSecret(KEY, null)
+            if (!PlatformSettings.writeSecret(KEY, null)) return false
+            val verified = PlatformSettings.readSecret(KEY)
+            if (!verified.available || verified.value != null) return false
             activeAccountId = null
             activeProfileId = null
-            return PlatformSettings.getSecret(KEY) == null
+            return true
         }
         val encoded = json.encodeToString(
             StoredState.serializer(), StoredState(all, activeAccountId)
         )
-        PlatformSettings.putSecret(
-            KEY,
-            encoded,
-        )
-        val saved = PlatformSettings.getSecret(KEY) == encoded
+        if (!PlatformSettings.writeSecret(KEY, encoded)) return false
+        val verified = PlatformSettings.readSecret(KEY)
+        val saved = verified.available && verified.value == encoded
         if (!saved) DebugLog.w("could not persist account sessions")
         return saved
     }

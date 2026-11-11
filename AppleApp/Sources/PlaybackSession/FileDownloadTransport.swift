@@ -94,7 +94,11 @@ final class FileDownloadTransport: NSObject, URLSessionDownloadDelegate, @unchec
                 waiters[id] = continuation; progressHandlers[id] = progress
                 var task = existing
                 if task == nil, let request {
-                    let signature = (request.url?.absoluteString ?? "") + "|" + (request.allHTTPHeaderFields ?? [:]).sorted { $0.key < $1.key }.map { $0.key + ":" + $0.value }.joined(separator: "|")
+                    let signature = DownloadResumeSignature.make(
+                        url: request.url?.absoluteString ?? "",
+                        headers: request.allHTTPHeaderFields ?? [:],
+                        allowsCellular: request.allowsCellularAccess
+                    )
                     let digest = Data(SHA256.hash(data: Data(signature.utf8))).base64EncodedString()
                     let sameRequest = (try? String(contentsOf: file(id, "request"), encoding: .utf8)) == digest
                     if sameRequest, let resume = try? Data(contentsOf: file(id, "resume")) {

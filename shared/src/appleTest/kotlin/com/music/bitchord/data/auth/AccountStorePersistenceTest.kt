@@ -1,6 +1,7 @@
 package com.music.bitchord.data.auth
 
 import com.music.bitchord.data.settings.SecretStoreBridge
+import com.music.bitchord.data.settings.SecretRead
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlin.test.AfterTest
@@ -14,17 +15,25 @@ import kotlin.test.assertTrue
 class AccountStorePersistenceTest {
     private val secrets = mutableMapOf<String, String>()
     private var refuseWrites = false
+    private var unavailableReads = false
+    private var hideAfterRefusedWrite = false
 
     @BeforeTest
     fun setUp() {
         SecretStoreBridge.setImpl(object : SecretStoreBridge.Impl {
-            override fun get(key: String): String? = secrets[key]
+            override fun get(key: String): String? = if (unavailableReads) null else secrets[key]
+            override fun read(key: String): SecretRead = SecretRead(get(key), !unavailableReads)
             override fun put(key: String, value: String?) {
-                if (refuseWrites) return
+                if (refuseWrites) {
+                    if (hideAfterRefusedWrite) unavailableReads = true
+                    return
+                }
                 if (value == null) secrets.remove(key) else secrets[key] = value
             }
         })
         refuseWrites = false
+        unavailableReads = false
+        hideAfterRefusedWrite = false
         AccountStore.restore()
     }
 
@@ -32,6 +41,8 @@ class AccountStorePersistenceTest {
     fun tearDown() {
         secrets.clear()
         refuseWrites = false
+        unavailableReads = false
+        hideAfterRefusedWrite = false
         AccountStore.restore()
         SecretStoreBridge.setImpl(null)
     }
@@ -78,6 +89,33 @@ class AccountStorePersistenceTest {
         AccountStore.restore()
         assertEquals("a", AccountStore.activeSelection()?.account?.accountId)
         assertEquals("one", AccountStore.activeSelection()?.profile?.profileId)
+    }
+
+    @Test
+    fun unavailable_read_after_failed_delete_is_not_successful_sign_out() {
+        assertTrue(AccountStore.record("a", "SAPISID=test-fixture", "A",
+            profiles = listOf(YouTubeProfile(profileId = "one", name = "One"))))
+        val saved = secrets["account_sessions"]
+        refuseWrites = true
+        hideAfterRefusedWrite = true
+
+        assertEquals(false, AccountStore.forget("a"))
+        assertEquals(saved, secrets["account_sessions"])
+
+        unavailableReads = false
+        refuseWrites = false
+        hideAfterRefusedWrite = false
+        AccountStore.restore()
+        assertEquals("a", AccountStore.activeSelection()?.account?.accountId)
+    }
+
+    @Test
+    fun successful_last_account_deletion_remains_deleted_after_restore() {
+        assertTrue(AccountStore.record("a", "SAPISID=test-fixture", "A"))
+        assertTrue(AccountStore.forget("a"))
+        assertEquals(null, secrets["account_sessions"])
+        AccountStore.restore()
+        assertTrue(AccountStore.accounts().isEmpty())
     }
 
     @Test

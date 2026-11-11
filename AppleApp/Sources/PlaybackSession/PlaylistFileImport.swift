@@ -39,6 +39,7 @@ enum PlaylistFileImport {
     enum ImportError: LocalizedError {
         case unsupportedFormat
         case noTrackRows
+        case tooManyTracks(Int)
 
         var errorDescription: String? {
             switch self {
@@ -46,6 +47,8 @@ enum PlaylistFileImport {
                 return "Choose a CSV or TSV playlist export with track titles and artists."
             case .noTrackRows:
                 return "The file did not contain any recognizable track rows."
+            case .tooManyTracks(let count):
+                return "This file contains \(count) tracks. BitChord can import up to 500 tracks at a time; split the file and import each part."
             }
         }
     }
@@ -90,36 +93,69 @@ enum PlaylistFileImport {
             )
         }
         guard !rows.isEmpty else { throw ImportError.noTrackRows }
+        guard rows.count <= 500 else { throw ImportError.tooManyTracks(rows.count) }
         return PlaylistImportDraft(
             title: URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent,
             sourceName: URL(fileURLWithPath: filename).lastPathComponent,
-            rows: Array(rows.prefix(500))
+            rows: rows
         )
     }
 
     /// Match a small fixed number at once to avoid flooding catalog search.
-    static func match(_ draft: PlaylistImportDraft) async -> PlaylistImportDraft {
+    static func match(
+        _ draft: PlaylistImportDraft,
+        onProgress: @Sendable @escaping (Int, Int) -> Void = { _, _ in }
+    ) async -> PlaylistImportDraft {
         var result = draft
-        let input = draft.rows
-        var output = Array<PlaylistImportRow?>(repeating: nil, count: input.count)
+        result.rows = await mapWithBoundedConcurrency(draft.rows, limit: 4, onProgress: onProgress) { row in
+            await match(row)
+        }
+        return result
+    }
+
+    /// Runs only a bounded number of operations at once. Cancellation stops new
+    /// work from being scheduled; partial output is intentionally returned so
+    /// callers can discard it when their task was canceled.
+    static func mapWithBoundedConcurrency<Input: Sendable, Output: Sendable>(
+        _ input: [Input],
+        limit: Int,
+        onProgress: @Sendable (Int, Int) -> Void = { _, _ in },
+        operation: @escaping @Sendable (Input) async -> Output
+    ) async -> [Output] {
+        guard !input.isEmpty else { return [] }
+        let concurrency = max(1, limit)
+        var output = Array<Output?>(repeating: nil, count: input.count)
+        var completed = 0
         var next = 0
-        await withTaskGroup(of: (Int, PlaylistImportRow).self) { group in
-            let initial = min(4, input.count)
-            for index in 0..<initial {
-                group.addTask { (index, await match(input[index])) }
+        await withTaskGroup(of: (Int, Output).self) { group in
+            for index in 0..<min(concurrency, input.count) {
+                group.addTask { (index, await operation(input[index])) }
+                next += 1
             }
-            next = initial
-            while let (index, row) = await group.next() {
-                output[index] = row
+            while let (index, value) = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
+                output[index] = value
+                completed += 1
+                onProgress(completed, input.count)
                 if next < input.count {
                     let scheduled = next
-                    group.addTask { (scheduled, await match(input[scheduled])) }
+                    group.addTask { (scheduled, await operation(input[scheduled])) }
                     next += 1
                 }
             }
         }
-        result.rows = output.compactMap { $0 }
-        return result
+        return output.compactMap { $0 }
+    }
+
+    static func mayPresentResult(
+        requestID: UUID,
+        activeRequestID: UUID?,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled && activeRequestID == requestID
     }
 
     private static func match(_ row: PlaylistImportRow) async -> PlaylistImportRow {
@@ -191,7 +227,7 @@ enum PlaylistFileImport {
             } else if char == delimiter {
                 record.append(field)
                 field = ""
-            } else if char == "\n" || char == "\r" {
+            } else if char == "\n" || char == "\r" || char == "\r\n" {
                 record.append(field)
                 field = ""
                 if record.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {

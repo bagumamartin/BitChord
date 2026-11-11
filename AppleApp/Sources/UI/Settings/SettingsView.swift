@@ -106,6 +106,7 @@ struct SettingsView: View {
     /// The settings search box. Empty means "no filter", not "nothing" — clearing
     /// it must bring the whole screen back.
     @State private var search = ""
+    @State private var searchResultAnnouncement = ""
     @State private var deepLinkedSettingsSection: SettingsSection?
     #if os(macOS)
     @State private var settingsHistory = PathNavigator()
@@ -586,6 +587,12 @@ struct SettingsView: View {
                         }
                     } header: { Text("Settings") }
                 } else {
+                let resultCount = sections.reduce(0) { $0 + $1.rows.count }
+                Text("\(resultCount) results")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(searchResultAnnouncement.isEmpty ? "\(resultCount) results" : searchResultAnnouncement)
+                    .accessibilityIdentifier("settings-search-result-count")
                 ForEach(sections) { built in
                     Section {
                         ForEach(built.rows) { row in
@@ -609,6 +616,21 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .task(id: search) {
+                guard !search.isEmpty else {
+                    searchResultAnnouncement = ""
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(450))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                let count = builtSections().reduce(0) { $0 + $1.rows.count }
+                searchResultAnnouncement = "\(count) settings search results"
+                announceSettingsSearchResults(searchResultAnnouncement)
+            }
             // The sheets, the picker and the warning belong to the screen rather than
             // to one group: the group they used to hang off can be filtered away, and
             // what it raises must still be able to appear.
@@ -616,6 +638,21 @@ struct SettingsView: View {
             .onAppear { consumeSettingsDeepLinkIfNeeded(using: proxy) }
             .onChange(of: requestedSettingsPage) { _, _ in consumeSettingsDeepLinkIfNeeded(using: proxy) }
         }
+    }
+
+    private func announceSettingsSearchResults(_ message: String) {
+        #if os(iOS)
+        UIAccessibility.post(notification: .announcement, argument: message)
+        #else
+        NSAccessibility.post(
+            element: NSApp as Any,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue
+            ]
+        )
+        #endif
     }
 
     private func consumeSettingsDeepLinkIfNeeded(using proxy: ScrollViewProxy) {

@@ -54,7 +54,9 @@ object LyricsAudioAlignment {
                 val lastTime = line.words.take(target.size).maxOf { it.endMs }
                 observationCursor = maxOf(
                     observationCursor,
-                    words.indexOfLast { it.endMs <= lastTime + 1_000L } + 1,
+                    // The next line may start immediately after this one.
+                    // Consuming a tolerance window also consumes its anchors.
+                    words.indexOfLast { it.endMs <= lastTime } + 1,
                 )
                 return@map line
             }

@@ -387,7 +387,8 @@ struct SearchView: View {
     @State private var librarySongs: [YouTubeSong] = []
     @State private var libraryShelves: [FeedShelf] = []
     @State private var libraryLoading = false
-    @State private var libraryError: String?
+    @State private var librarySongsError: String?
+    @State private var libraryShelvesError: String?
     @State private var local = LocalLibrary.shared
     /// The iPad pill's two steps; see `setIPadSearchExpanded`.
     @State private var pillRoomy = false
@@ -763,7 +764,7 @@ struct SearchView: View {
                 ToolbarSearchSourceSwitcher(selection: $searchSource)
             }
             if hostsWindowControls {
-                MacWindowControls()
+                MacWindowControls(includesSearchAction: false)
             }
         }
     }
@@ -986,17 +987,35 @@ struct SearchView: View {
             return
         }
         libraryLoading = librarySongs.isEmpty && libraryShelves.isEmpty
-        libraryError = nil
-        async let songs = InnertubeFeed.shared.librarySongs()
-        async let shelves = InnertubeFeed.shared.library()
-        var failure: String?
-        do { librarySongs = try await songs } catch { failure = error.localizedDescription }
-        do { libraryShelves = try await shelves } catch { failure = failure ?? error.localizedDescription }
+        librarySongsError = nil
+        libraryShelvesError = nil
+        async let songsResult = Result { try await InnertubeFeed.shared.librarySongs() }
+        async let shelvesResult = Result { try await InnertubeFeed.shared.library() }
+        let (songs, shelves) = await (songsResult, shelvesResult)
         guard !Task.isCancelled else { return }
-        // One half arriving is enough to search; the error is for when there
-        // is nothing to search at all.
-        libraryError = librarySongs.isEmpty && libraryShelves.isEmpty ? failure : nil
+        switch songs {
+        case .success(let value): librarySongs = value
+        case .failure(let error): librarySongsError = error.localizedDescription
+        }
+        switch shelves {
+        case .success(let value): libraryShelves = value
+        case .failure(let error): libraryShelvesError = error.localizedDescription
+        }
         libraryLoading = false
+    }
+
+    private func retryLibrarySongs() async {
+        do {
+            librarySongs = try await InnertubeFeed.shared.librarySongs()
+            librarySongsError = nil
+        } catch { librarySongsError = error.localizedDescription }
+    }
+
+    private func retryLibraryShelves() async {
+        do {
+            libraryShelves = try await InnertubeFeed.shared.library()
+            libraryShelvesError = nil
+        } catch { libraryShelvesError = error.localizedDescription }
     }
 
     /// The Library source's column. It filters as the field is typed into —
@@ -1028,14 +1047,20 @@ struct SearchView: View {
                 .padding(.horizontal, 28)
                 .padding(.vertical, 12)
             }
-        } else if matches.isEmpty, let libraryError, !local.scanned {
-            EmptyStateView(icon: Image(.bchLibrary), title: "Library unavailable", subtitle: libraryError, buttonTitle: "Retry") {
-                Task { await loadLibrary() }
-            }
-        } else if matches.isEmpty {
+        } else if matches.isEmpty && librarySongsError == nil && libraryShelvesError == nil {
             EmptyStateView(icon: Image(.bchSearch), title: "No results", subtitle: "Nothing in your library for “\(term)”.", buttonTitle: nil, action: nil)
         } else {
             List {
+                if let librarySongsError {
+                    LibraryPartialFailureRow(category: "Songs", message: librarySongsError) {
+                        Task { await retryLibrarySongs() }
+                    }
+                }
+                if let libraryShelvesError {
+                    LibraryPartialFailureRow(category: "Albums, artists and playlists", message: libraryShelvesError) {
+                        Task { await retryLibraryShelves() }
+                    }
+                }
                 if !matches.songs.isEmpty {
                     librarySection("Songs") {
                         let entries = matches.songs.map(Self.libraryEntry)
@@ -1334,22 +1359,32 @@ struct SearchView: View {
                     roundArtwork: hit.browseType?.uppercased() == "ARTIST"
                 )
             } else {
-                SongRow(
-                    entry: hit.asEntry(),
-                    isCurrent: isCurrentlyPlaying(hit),
-                    play: {
-                        recordTrackEntity(hit)
-                        let tracks = listHits.filter(\.isTrack).map { $0.asEntry() }
-                        let at = tracks.firstIndex(where: { $0.id == hit.videoId }) ?? 0
-                        if scope == .songs {
-                            controller.playRadio(hit.asEntry())
-                        } else {
-                            controller.play(tracks, at: at)
-                        }
-                    },
-                    playNext: { controller.playNext(hit.asEntry()) },
-                    addToQueue: { controller.addToQueue(hit.asEntry()) }
-                )
+                VStack(alignment: .leading, spacing: 0) {
+                    SongRow(
+                        entry: hit.asEntry(),
+                        isCurrent: isCurrentlyPlaying(hit),
+                        play: {
+                            recordTrackEntity(hit)
+                            let tracks = listHits.filter(\.isTrack).map { $0.asEntry() }
+                            let at = tracks.firstIndex(where: { $0.id == hit.videoId }) ?? 0
+                            if scope == .songs {
+                                controller.playRadio(hit.asEntry())
+                            } else {
+                                controller.play(tracks, at: at)
+                            }
+                        },
+                        playNext: { controller.playNext(hit.asEntry()) },
+                        addToQueue: { controller.addToQueue(hit.asEntry()) }
+                    )
+                    if let album = hit.albumName, !album.isEmpty {
+                        Label(album, systemImage: "square.stack")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.leading, 60)
+                            .padding(.bottom, 5)
+                    }
+                }
             }
         }
         .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
@@ -1997,6 +2032,27 @@ struct SearchView: View {
                 // the sentinel can try again on the next pass.
             }
         }
+    }
+}
+
+private struct LibraryPartialFailureRow: View {
+    let category: String
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Couldn't load \(category)").font(.subheadline.weight(.semibold))
+                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 4)
+            Button("Retry", action: retry).font(.subheadline)
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
     }
 }
 

@@ -37,7 +37,7 @@ data class ClarityTuning(val preset: ClarityPreset = ClarityPreset.REFERENCE, va
 
 enum class AudioQuality(val maxKbps: Int, val label: String) {
     LOW(64, "Low"),
-    MEDIUM(Int.MAX_VALUE, "Medium"),
+    MEDIUM(128, "Medium"),
     HIGH(Int.MAX_VALUE, "High"),
     LOSSLESS(Int.MAX_VALUE, "Lossless"),
     ;

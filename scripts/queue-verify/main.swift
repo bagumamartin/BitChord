@@ -14,6 +14,13 @@ func track(_ id: String, order: Int? = nil, autoplay: Bool = false) -> QueueEntr
     entry.contextOrder = order
     return entry
 }
+check(QueueSearchPolicy.matches(title: "Northern Lights", artist: "Mira Vale", query: "NORTHERN"), "Queue search matches titles without case sensitivity")
+check(QueueSearchPolicy.matches(title: "Northern Lights", artist: "Mira Vale", query: "mira"), "Queue search matches artist names")
+check(!QueueSearchPolicy.matches(title: "Northern Lights", artist: "Mira Vale", query: "another song"), "Queue search excludes non-matching rows")
+check(QueueSearchPolicy.matches(title: "Northern Lights", artist: "Mira Vale", query: "  "), "Whitespace-only queue search preserves every row")
+check(PlaybackHandoffPolicy.acceptsRepeatOne(title: "A", artist: "Artist", sourceIsArmed: true, currentTitle: "A", currentArtist: "Artist"), "Repeat-one accepts an armed self-mix for the selected track")
+check(!PlaybackHandoffPolicy.acceptsRepeatOne(title: "Old", artist: "Artist", sourceIsArmed: true, currentTitle: "New", currentArtist: "Artist"), "Repeat-one rejects a different-track handoff after a manual selection")
+check(!PlaybackHandoffPolicy.acceptsRepeatOne(title: "A", artist: "Artist", sourceIsArmed: false, currentTitle: "A", currentArtist: "Artist"), "Repeat-one rejects a handoff whose source was not armed")
 let queue = [track("played", order: 0), track("selected", order: 1),
              track("manual"), track("low", order: 2), track("high", order: 3),
              track("suggestion", autoplay: true)]

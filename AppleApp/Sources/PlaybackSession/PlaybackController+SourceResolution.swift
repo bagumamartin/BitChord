@@ -76,9 +76,13 @@ extension PlaybackController {
         @MainActor
         static func current() -> ResolvePrefs {
             let streamQuality = AppSettings.shared.effectiveAudioQuality(metered: NetworkQuality.shared.metered).name
+            let configuredMaximum = Int(NetworkQuality.shared.maxKbps)
+            // Kotlin's Int.max crosses the bridge as Int32.max. Normalize that
+            // sentinel before applying stream caps in Swift-only source paths.
+            let maxKbps = configuredMaximum >= Int(Int32.max) ? Int.max : configuredMaximum
             NSLog("[BitChord] playback quality requested=\(streamQuality) network=\(NetworkQuality.shared.metered ? "metered" : "unmetered")")
             return ResolvePrefs(
-                maxKbps: Int(NetworkQuality.shared.maxKbps),
+                maxKbps: maxKbps,
                 wantLossless: streamQuality == "LOSSLESS",
                 jiosaavn: PlatformSettings.shared.getBoolean(key: "jiosaavn_enabled", default: true),
                 canSubstitute: QualityUpgrade.canSubstituteForYouTube(),
@@ -95,31 +99,42 @@ extension PlaybackController {
     ) async throws -> ResolveOutcome {
         await DownloadStore.shared.waitUntilReady()
         try Task.checkCancellation()
-        if !entry.isLocal { await StreamFileCache.shared.remember(entry) }
+        if !entry.isLocal && !OfflinePlaybackPolicy.isEnabled {
+            await StreamFileCache.shared.remember(entry)
+        }
         let pinnedOriginal = entry.source.hasPrefix("yt:") && OriginalVersion.shared.isPinned(videoId: entry.id)
         if let asset = await DownloadStore.shared.playbackAsset(for: entry, onlyOriginal: pinnedOriginal) {
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "download")
             return ResolveOutcome(source: ResolvedSource(source: asset.path, headers: [:], kbps: asset.kbps,
                 lossless: asset.lossless, codec: asset.codec, origin: .local, youtubeVideoId: asset.youtubeVideoId), leftover: nil)
         }
-        if !freshResolution, !entry.isLocal,
+        if (!freshResolution || OfflinePlaybackPolicy.isEnabled), !entry.isLocal,
            let cached = await StreamFileCache.shared.path(for: entry.id, allowQualityFallback: true,
                 onlyOriginal: entry.source.hasPrefix("yt:") && OriginalVersion.shared.isPinned(videoId: entry.id)) {
             let metadata = await StreamFileCache.shared.metadata(at: cached)
             let musicOnlyVideo = prefs.preferMusicOnly && entry.isVideo && !OriginalVersion.shared.isPinned(videoId: entry.id)
             if (!musicOnlyVideo || (metadata?.playbackMediaId == entry.id && metadata?.recordingVerified == true)),
                let verified = NativeStreamVerifier.verifyCachedFile(cached) {
-            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
-            return ResolveOutcome(source: ResolvedSource(source: cached, headers: [:],
-                kbps: verified.estimatedKbps.map(Int.init) ?? metadata?.kbps ?? 0,
-                lossless: verified.format.losslessPcm, codec: verified.format.codec,
-                durationSec: metadata?.durationSeconds, loudnessDb: metadata?.relativeLoudnessDb,
-                clientName: "cache", origin: .cache, youtubeVideoId: metadata?.youtubeVideoId), leftover: nil)
+                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
+                return ResolveOutcome(source: ResolvedSource(source: cached, headers: [:],
+                    kbps: verified.estimatedKbps.map(Int.init) ?? metadata?.kbps ?? 0,
+                    lossless: verified.format.losslessPcm, codec: verified.format.codec,
+                    durationSec: metadata?.durationSeconds, loudnessDb: metadata?.relativeLoudnessDb,
+                    clientName: "cache", origin: .cache, youtubeVideoId: metadata?.youtubeVideoId), leftover: nil)
             }
+        }
+        // Offline mode is deliberately checked after both durable downloads and
+        // eligible stream-cache hits, but before every network-backed source.
+        // This keeps an unavailable track in its queue slot so the listener can
+        // retry after reconnecting.
+        if OfflinePlaybackSourcePolicy.blocksUncachedSource(
+            source: entry.source, isLocal: entry.isLocal, offlineEnabled: OfflinePlaybackPolicy.isEnabled
+        ) {
+            throw InnertubeStreamResolver.StreamError(message: OfflinePlaybackPolicy.unavailableMessage)
         }
         if entry.source.hasPrefix("saavn:") || entry.id.hasPrefix("saavn:") {
             let id = entry.source.hasPrefix("saavn:") ? String(entry.source.dropFirst(6)) : String(entry.id.dropFirst(6))
-            if let hit = await JioSaavn.streamURL(for: id) {
+            if let hit = await JioSaavn.streamURL(for: id, maxKbps: prefs.maxKbps) {
                 await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "JioSaavn")
                 return ResolveOutcome(
                     source: ResolvedSource(
@@ -127,6 +142,11 @@ extension PlaybackController {
                         lossless: false, origin: .substitute
                     ),
                     leftover: nil
+                )
+            }
+            if prefs.maxKbps < Int.max {
+                throw InnertubeStreamResolver.StreamError(
+                    message: StreamBitrateCapPolicy.unavailableMessage(maxKbps: prefs.maxKbps)
                 )
             }
             throw InnertubeStreamResolver.StreamError(message: "JioSaavn had no stream")
@@ -144,6 +164,11 @@ extension PlaybackController {
                 durationSec: entry.durationSeconds > 0 ? Int(entry.durationSeconds.rounded()) : nil,
                 diagnostic: report.record
             ) {
+                guard StreamBitrateCapPolicy.acceptsKnownBitrate(stream.kbps, maxKbps: prefs.maxKbps) else {
+                    throw InnertubeStreamResolver.StreamError(
+                        message: StreamBitrateCapPolicy.unavailableMessage(maxKbps: prefs.maxKbps)
+                    )
+                }
                 await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
                 return ResolveOutcome(
                     source: ResolvedSource(
@@ -163,6 +188,13 @@ extension PlaybackController {
         }
         #endif
         guard entry.source.hasPrefix("yt:") else {
+            let sourceScheme = URL(string: entry.source)?.scheme?.lowercased()
+            let isLocalFile = entry.isLocal && (sourceScheme == nil || sourceScheme == "file")
+            if !isLocalFile && StreamBitrateCapPolicy.blocksUnreducibleRemoteOriginal(maxKbps: prefs.maxKbps) {
+                throw InnertubeStreamResolver.StreamError(
+                    message: StreamBitrateCapPolicy.unreducibleRemoteMessage
+                )
+            }
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "WebDAV/local")
             // A file on a remote library plays from its own address, and that address
             // needs the share's credential — the same header the cover fetch and the
@@ -184,6 +216,9 @@ extension PlaybackController {
         if !freshResolution, !(prefs.preferMusicOnly && entry.isVideo && !OriginalVersion.shared.isPinned(videoId: videoId)),
            let growing = streamGate.lock.withLock({ streamGate.growing[videoId] }),
            FileManager.default.fileExists(atPath: growing),
+           StreamBitrateCapPolicy.acceptsKnownBitrate(
+                streamGate.lock.withLock { streamGate.growingKbps[videoId] }, maxKbps: prefs.maxKbps
+           ),
            !FileManager.default.fileExists(atPath: growing + ".failed"),
            !FileManager.default.fileExists(atPath: growing + ".playback-cancelled") {
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
@@ -219,8 +254,12 @@ extension PlaybackController {
         preparationBudget: TimeInterval?,
         latencyResolved: PlaybackLatencyRecorder? = nil
     ) async throws -> ResolveOutcome {
+        guard !OfflinePlaybackPolicy.isEnabled else {
+            throw InnertubeStreamResolver.StreamError(message: OfflinePlaybackPolicy.unavailableMessage)
+        }
         let report = PlaybackLookupReport()
         let lookup = Task<QualityUpgrade.Candidate?, Never> {
+            guard !OfflinePlaybackPolicy.isEnabled else { return nil }
             if preparationBudget != nil && prefs.canSubstitute && !entry.isVideo {
                 let stream = await SourceSubstitution.prefetch(
                     title: entry.title, artist: entry.artist,
@@ -414,6 +453,9 @@ extension PlaybackController {
     private static func resolveYouTube(
         videoId: String, prefs: ResolvePrefs
     ) async throws -> ResolvedSource {
+        guard !OfflinePlaybackPolicy.isEnabled else {
+            throw InnertubeStreamResolver.StreamError(message: OfflinePlaybackPolicy.unavailableMessage)
+        }
         var refusedClients: [String] = []
         var rebuilt = false
         func record(_ error: Error) {
@@ -429,7 +471,8 @@ extension PlaybackController {
         func rebuildAndResolve(after error: Error) async throws -> ResolvedYouTubeStream {
             // A bot check is the network's verdict; a new session asks again
             // from the same address and only adds to the suspicion.
-            guard !rebuilt, !InnertubeStreamResolver.StreamError.isBotCheck(error) else { throw error }
+            guard !OfflinePlaybackPolicy.isEnabled,
+                  !rebuilt, !InnertubeStreamResolver.StreamError.isBotCheck(error) else { throw error }
             rebuilt = true
             PlaybackDebugLog.shared.record(
                 "no client would serve this track (\(refusedClients.isEmpty ? "extraction failed" : refusedClients.joined(separator: ", "))); rebuilding the session and asking again",
@@ -448,6 +491,9 @@ extension PlaybackController {
         }
         /// The next URL after a refusal: another client, then a rebuilt session.
         func nextStream() async throws -> ResolvedYouTubeStream {
+            guard !OfflinePlaybackPolicy.isEnabled else {
+                throw InnertubeStreamResolver.StreamError(message: OfflinePlaybackPolicy.unavailableMessage)
+            }
             let exhausted = InnertubeStreamResolver.StreamError(
                 message: "Every client refused this track (\(refusedClients.joined(separator: ", ")))"
             )
@@ -626,7 +672,7 @@ extension PlaybackController {
     /// not request media bytes; the opening range remains coupled to playback.
     func warmUpcoming(around index: Int, generation: UInt64) {
         guard state == .playing || state == .buffering || state == .paused else { return }
-        guard NetworkQuality.shared.connected, repeatMode != .one else {
+        guard NetworkQuality.shared.connected, !OfflinePlaybackPolicy.isEnabled, repeatMode != .one else {
             urlPrefetchTask?.cancel(); urlPrefetchFingerprint = nil
             return
         }
@@ -755,6 +801,9 @@ extension PlaybackController {
         videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max), expectedMimeType: String? = nil, firstRangeRetry: Int = 0
     ) async throws -> String {
         let qualityIdentity = StreamFileCache.qualityIdentity
+        // Capture before the transfer starts. If the listener clears cache while
+        // this transfer is in flight, its later callbacks cannot repopulate it.
+        let cacheGeneration = await StreamFileCache.shared.generationToken()
         let requestID = "playback:" + UUID().uuidString
         streamGate.lock.withLock { streamGate.requests[requestID] = (videoId, nil) }
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
@@ -772,7 +821,7 @@ extension PlaybackController {
                     streamGate.lock.withLock { streamGate.requests[requestID]?.path = path }
                     streamGate.lock.withLock { streamGate.growing[videoId] = path; streamGate.growingQuality[videoId] = qualityIdentity; streamGate.growingKbps[videoId] = kbps }
                     Task {
-                        await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds)
+                        await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, generation: cacheGeneration)
                         continuation.resume(returning: path)
                     }
                 } else {
@@ -801,7 +850,7 @@ extension PlaybackController {
                 if waiting, let path { continuation.resume(returning: path) }
                 if let path {
                     Task {
-                        await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds)
+                        await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, generation: cacheGeneration)
                         streamGate.lock.withLock {
                             if streamGate.growing[videoId] == path { streamGate.growing[videoId] = nil; streamGate.growingQuality[videoId] = nil; streamGate.growingKbps[videoId] = nil; streamGate.durations[videoId] = nil }
                             streamGate.retired[path] = String(videoId.prefix(while: { $0 != "#" }))

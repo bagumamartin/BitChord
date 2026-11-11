@@ -15,6 +15,8 @@ actor StreamFileCache {
     private var verifiedSources: [String: (hash: String, mediaID: String)] = [:]
     private var rememberedEntries: [String: QueueEntry] = [:]
     private var artworkTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    private var cacheGeneration = CacheGeneration()
+    private var pendingClearPaths: Set<String> = []
     private let artworkStore: OfflineArtworkStore
     init(directory: URL? = nil, artworkStore: OfflineArtworkStore = .shared) { self.directory = directory; self.artworkStore = artworkStore }
 
@@ -96,6 +98,7 @@ actor StreamFileCache {
     }
 
     func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true, allowQualityFallback: Bool = false, onlyOriginal: Bool = false) -> String? {
+        purgeReleasedFiles()
         if allowGrowing, let active = inFlight[videoId],
            (active.quality == Self.qualityIdentity || (allowQualityFallback && Self.compatiblePlaybackIdentity(active.quality, Self.qualityIdentity))),
            FileManager.default.fileExists(atPath: active.path),
@@ -173,7 +176,13 @@ actor StreamFileCache {
 
     /// The download has its first bytes. Later resolves of the same track must
     /// join this file instead of starting a second fetch at the handoff.
-    func noteGrowing(videoId: String, path: String, kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil) {
+    /// Capture this before a stream transfer starts and pass it to
+    /// `noteGrowing` and `store`. A clear advances the token without canceling
+    /// a reader; work that started before that clear cannot republish afterward.
+    func generationToken() -> UInt64 { cacheGeneration.value }
+
+    func noteGrowing(videoId: String, path: String, kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, generation: UInt64) {
+        guard cacheGeneration.accepts(generation) else { return }
         guard !FileManager.default.fileExists(atPath: path + ".complete") else { return }
         inFlight[videoId] = (path, quality ?? Self.qualityIdentity, kbps, relativeLoudnessDb, youtubeVideoId, durationSeconds)
     }
@@ -184,8 +193,9 @@ actor StreamFileCache {
         if path == nil || inFlight[videoId]?.path == path { inFlight.removeValue(forKey: videoId) }
     }
 
-    func store(_ videoId: String, path: String, sourceIdentity: String = "unknown", codec: String = "unknown", kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil) {
+    func store(_ videoId: String, path: String, sourceIdentity: String = "unknown", codec: String = "unknown", kbps: Int = 0, quality: String? = nil, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, generation: UInt64) {
         defer { if inFlight[videoId]?.path == path { inFlight.removeValue(forKey: videoId) } }
+        guard cacheGeneration.accepts(generation) else { return }
         guard !FileManager.default.fileExists(atPath: path + ".failed"),
               !FileManager.default.fileExists(atPath: path + ".grow") || FileManager.default.fileExists(atPath: path + ".complete") else { return }
         let suppliedExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
@@ -211,6 +221,10 @@ actor StreamFileCache {
         let entry = rememberedEntries[playbackMediaId ?? videoId]
         let manifest = Manifest(codec: cachedCodec, kbps: kbps, quality: quality ?? Self.qualityIdentity, sourceIdentity: sourceIdentity, recordingIdentity: videoId, complete: true, bytes: bytes.int64Value, sha256: hash, youtubeVideoId: youtubeVideoId, relativeLoudnessDb: relativeLoudnessDb, durationSeconds: durationSeconds, playbackMediaId: playbackMediaId, recordingVerified: recordingVerified, entry: entry)
         guard let data = try? JSONEncoder().encode(manifest), (try? data.write(to: manifestURL(dest.path), options: .atomic)) != nil else { return }
+        // A post-clear transfer can legitimately republish this same cache key.
+        // Its new file replaces the old inode, so the old reader's deferred
+        // cleanup marker must not later delete the fresh cache entry.
+        pendingClearPaths = CacheClearPolicy.removingRepublishedPath(dest.path, from: pendingClearPaths)
         inFlight.removeValue(forKey: videoId)
         if let playbackMediaId { aliases?[playbackMediaId]?.removeAll { $0 == dest } }
         if let playbackMediaId, recordingVerified {
@@ -284,13 +298,43 @@ actor StreamFileCache {
     }
 
     func clear() {
+        cacheGeneration.advance()
         artworkTasks.values.forEach { $0.task.cancel() }; artworkTasks.removeAll()
         rememberedEntries.removeAll()
         inFlight.removeAll()
         verifiedFiles.removeAll()
         aliases = nil
         verifiedSources.removeAll()
-        DiskCache.clearFolder(folder)
+        let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        let audio = files.filter { Self.extensions.contains($0.pathExtension.lowercased()) }
+        let audioPaths = Set(audio.map(\.path))
+        let activeReaderPaths = Set(audio.filter { sourceHasPlaybackReaders(source: $0.path) }.map(\.path))
+        let deferredPaths = CacheClearPolicy.pathsToDeferDeletion(audioPaths: audioPaths, activeReaderPaths: activeReaderPaths)
+        for file in audio {
+            if deferredPaths.contains(file.path) {
+                pendingClearPaths.insert(file.path)
+                try? FileManager.default.removeItem(at: manifestURL(file.path))
+                try? FileManager.default.removeItem(at: file.appendingPathExtension("loudness.json"))
+                try? FileManager.default.removeItem(at: OfflineArtworkStore.coverURL(audioPath: file.path))
+                try? FileManager.default.removeItem(at: file.appendingPathExtension("artwork.json"))
+            } else {
+                try? FileManager.default.removeItem(at: file)
+                for sidecar in [manifestURL(file.path), file.appendingPathExtension("loudness.json"), OfflineArtworkStore.coverURL(audioPath: file.path), file.appendingPathExtension("artwork.json")] {
+                    try? FileManager.default.removeItem(at: sidecar)
+                }
+            }
+        }
+        for file in files where !audioPaths.contains(file.path) {
+            try? FileManager.default.removeItem(at: file)
+        }
+        purgeReleasedFiles()
+    }
+
+    private func purgeReleasedFiles() {
+        for path in Array(pendingClearPaths) where !sourceHasPlaybackReaders(source: path) {
+            try? FileManager.default.removeItem(atPath: path)
+            pendingClearPaths.remove(path)
+        }
     }
 
     // MARK: - What is on disk
@@ -314,6 +358,7 @@ actor StreamFileCache {
     /// half-written one, so a file without a readable manifest is not listed —
     /// it is not something the listener could play from the cache anyway.
     func entries() -> [CachedEntry] {
+        purgeReleasedFiles()
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
@@ -378,6 +423,7 @@ actor StreamFileCache {
     }
 
     func trim(keeping videoId: String? = nil, limitBytes: Int64? = nil) {
+        purgeReleasedFiles()
         let limit = limitBytes ?? PlatformSettings.shared.getLong(key: "audio_cache_limit_bytes", default: Self.defaultLimit)
         let files = FileManager.default
         let urls = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []

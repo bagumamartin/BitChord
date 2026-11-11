@@ -102,6 +102,23 @@ struct HomeView: View {
                                 }
                         }
                     }
+                    if feed.loadingMore {
+                        ProgressView("Loading more")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    } else if let message = feed.paginationError {
+                        HStack(spacing: 12) {
+                            Label("More items couldn't load", systemImage: "exclamationmark.circle")
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 8)
+                            Button("Retry") { Task { await feed.loadMore() } }
+                        }
+                        .font(.subheadline)
+                        .padding(14)
+                        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+                        .accessibilityElement(children: .contain)
+                        .accessibilityHint(message)
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)

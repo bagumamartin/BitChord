@@ -60,7 +60,7 @@ enum JioSaavn {
         }
     }
 
-    static func streamURL(for trackId: String) async -> (url: String, kbps: Int)? {
+    static func streamURL(for trackId: String, maxKbps: Int = Int.max) async -> (url: String, kbps: Int)? {
         let id = trackId.hasPrefix("saavn:") ? String(trackId.dropFirst(6)) : trackId
         var comps = URLComponents(string: base)!
         comps.queryItems = [
@@ -87,11 +87,22 @@ enum JioSaavn {
               let encrypted = info["encrypted_media_url"] as? String,
               let decrypted = decryptDES(encrypted) else { return nil }
         let has320 = (info["320kbps"] as? String)?.lowercased() == "true"
-        if has320, let range = decrypted.range(of: #"_(48|96|160|320)\.(mp4|aac|mp3)$"#, options: .regularExpression) {
-            let ext = decrypted[range].split(separator: ".").last.map(String.init) ?? "mp4"
-            return (decrypted.replacingCharacters(in: range, with: "_320.\(ext)"), 320)
+        let currentRung = StreamBitrateCapPolicy.jioSaavnRung(in: decrypted)
+        if maxKbps < Int.max {
+            // The API's URL suffix is the only quality evidence this response
+            // supplies. If it is absent, do not claim the rendition fits.
+            guard currentRung != nil else { return nil }
+            let available = has320 ? StreamBitrateCapPolicy.jioSaavnRungs : [48, 96, 160]
+            guard let selected = StreamBitrateCapPolicy.bestJioSaavnRung(
+                available: available, maxKbps: maxKbps
+            ), let selectedURL = StreamBitrateCapPolicy.jioSaavnURL(decrypted, selecting: selected) else { return nil }
+            return (selectedURL, selected)
         }
-        return (decrypted, 160)
+        if has320, currentRung != nil,
+           let highestURL = StreamBitrateCapPolicy.jioSaavnURL(decrypted, selecting: 320) {
+            return (highestURL, 320)
+        }
+        return (decrypted, currentRung ?? 160)
     }
 
     /// Upstream `matchAndStream` for this catalogue: search, score, then open

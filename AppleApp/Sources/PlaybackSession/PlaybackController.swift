@@ -354,6 +354,7 @@ final class PlaybackController {
     /// on-device alignment rather than arriving from the provider. Cleared on
     /// every new fetch; see `alignFetchedLyricsIfNeeded`.
     var lyricsAlignedLocally = false
+    var lyricsAlignmentState: LyricsAlignmentState = .idle
     /// Re-run a lookup that began before the decoder reported the real duration.
     @ObservationIgnored var lyricsNeedsDurationRefresh = false
     /// A newer retry for the same track must win over an older provider race.
@@ -499,8 +500,11 @@ final class PlaybackController {
     /// The last detected edges per source, for C's no-tail instrumentation.
     var regionEdgesBySource: [String: (start: Double, end: Double?)] = [:]
     var loudnessMeasurementTask: Task<Void, Never>?
+    @ObservationIgnored private var localFolderAccess: SecurityScopedResourceLease?
     var loadedSourcePath: String? {
         didSet { if oldValue != loadedSourcePath {
+            localFolderAccess = LocalLibrary.shared.accessLease(for: loadedSourcePath)
+                ?? (localFolderAccess?.covers(loadedSourcePath) == true ? localFolderAccess : nil)
             scheduleLoudnessMeasurement()
             if let source = loadedSourcePath {
                 DownloadStore.shared.retainPlayback(paths: Set([source] + Array(sourceHeadersByPath.keys)))

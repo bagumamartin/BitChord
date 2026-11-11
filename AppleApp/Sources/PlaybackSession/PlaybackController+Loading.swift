@@ -12,16 +12,17 @@ import AppKit
 
 // Loading a queue entry into the engine, including Dolby Atmos.
 extension PlaybackController {
-    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true, freshResolution: Bool = false, reuseCurrentSource: Bool = false) {
+    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true, freshResolution: Bool = false, reuseCurrentSource: Bool = false, preservePlaybackIntent: Bool = false) {
         guard queue.indices.contains(index) else { return }
+        let shouldResumePlayback = state == .playing || (state == .buffering && !holdAfterLoad)
         startEngineIfNeeded()
         let engineStartupTask = self.engineStartupTask
         let entry = queue[index]
         deferredNetworkRecovery = nil
         let repeatedSource = reuseCurrentSource && current?.id == entry.id ? repeatableCurrentSource() : nil
         let requiresFreshResolution = freshResolution || (recoveryNeedsFreshResolution && current?.id == entry.id)
-        if current?.id == entry.id, playingIndex == index, engineLoadedId == entry.id,
-           state == .buffering || state == .playing {
+        if !requiresFreshResolution, current?.id == entry.id, playingIndex == index,
+           engineLoadedId == entry.id, (state == .buffering || state == .playing) {
             return
         }
         let latencyStartedAt = ProcessInfo.processInfo.systemUptime
@@ -83,7 +84,8 @@ extension PlaybackController {
         duration = 0
         lastError = nil
         state = .buffering
-        holdAfterLoad = false
+        holdAfterLoad = preservePlaybackIntent
+            && PlaybackLoadIntentPolicy.shouldHoldQualityReload(shouldResumePlayback: shouldResumePlayback)
         loadingGeneration = generation
         if refreshAutoplay {
             maybeAutoplay(force: true)
@@ -142,6 +144,10 @@ extension PlaybackController {
                     self.noteResolved(entry, outcome: outcome, prefs: prefs)
                 }
                 let resolved = outcome.source
+                if OfflinePlaybackPolicy.isEnabled,
+                   resolved.origin != .local, resolved.origin != .cache {
+                    throw InnertubeStreamResolver.StreamError(message: OfflinePlaybackPolicy.unavailableMessage)
+                }
                 if PlaybackCodecCapabilities.shared.canRenderDolby(codec: resolved.codec, headers: resolved.headers) {
                     _ = try await AudioSessionManager.activate(preferredSampleRate: nil)
                     try await self.loadDolby(resolved, entry: entry, index: index, start: resume, generation: generation)

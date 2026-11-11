@@ -18,6 +18,7 @@ import BitChordShared
 /// of it now.
 struct SourcesView: View {
     @Environment(ToastCenter.self) private var toast
+    @Environment(PlaybackController.self) private var controller
 
     @State private var sourceState = SourceListState.shared
     private var configs: [ConfigDocument] { sourceState.configs }
@@ -227,6 +228,23 @@ struct SourcesView: View {
     @ViewBuilder
     private var orderFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
+            DisclosureGroup("Why a source may be skipped") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("BitChord can skip a source when it is disabled, unreachable, missing a matching recording, or unable to improve the selected track's audio quality.")
+                    if let current = controller.current {
+                        let decision = controller.sourceDecisionNotes[current.id]
+                            ?? "Playing from \(controller.playbackSourceName ?? "the selected source")."
+                        Text("Current track: \(current.title) · \(decision)")
+                            .font(.caption)
+                    } else {
+                        Text("Play a track to see its source decision here.")
+                            .font(.caption)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            }
             Text("Reachable means the provider answered its checks. Audio quality is verified separately for each track.")
             Text("If a source does not have a track or cannot be reached, BitChord tries the next one. Sources above YouTube can replace its recording when they return a better version.")
             if !AudioRouteState.shared.carriesLossless {
@@ -616,12 +634,7 @@ struct AudioQuality {
     var name: String
 
     var label: String {
-        switch name {
-        case "LOW": return "Low"
-        case "MEDIUM": return "Medium"
-        case "HIGH": return "High"
-        default: return "Lossless"
-        }
+        AudioQualityOption.label(name, in: AudioQualityOption.stream)
     }
 }
 

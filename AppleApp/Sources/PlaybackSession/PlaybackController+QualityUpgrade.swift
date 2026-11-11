@@ -13,6 +13,50 @@ import AppKit
 // Quality upgrades: finding a better copy and swapping to it mid-track.
 extension PlaybackController {
 
+    /// Stops speculative network work when device-only playback is enabled.
+    func offlinePlaybackEnabled() {
+        guard OfflinePlaybackPolicy.isEnabled else { return }
+        urlPrefetchTask?.cancel()
+        urlPrefetchTask = nil
+        urlPrefetchFingerprint = nil
+        nextPreparationTask?.cancel()
+        nextPreparationTask = nil
+        durationRepairTask?.cancel()
+        qualityUpgradeTask?.cancel()
+        qualityUpgradeTask = nil
+        if let id = current?.id { QualityUpgrade.forget(id) }
+        upgradeFor = nil
+        racingLossless = false
+        syncEngineQueueNext()
+        if let current,
+           queue.indices.contains(playingIndex), queue[playingIndex].id == current.id,
+           OfflinePlaybackSourcePolicy.blocksUncachedSource(
+                source: current.source, isLocal: current.isLocal, offlineEnabled: true
+           ) {
+            loadCurrent(
+                playingIndex, startAt: max(0, livePosition(at: Date())), refreshAutoplay: false,
+                freshResolution: true, preservePlaybackIntent: true
+            )
+        }
+    }
+
+    /// Re-resolves the current track using the saved stream preference while
+    /// retaining both its audible intent and playhead position.
+    func applySavedQualityToCurrentTrack() {
+        guard let entry = current, queue.indices.contains(playingIndex),
+              queue[playingIndex].id == entry.id else { return }
+        guard !OfflinePlaybackPolicy.isEnabled else {
+            return
+        }
+        // The displayed transport clock also includes a seek that the engine
+        // has queued but not applied yet. Reading the decoder here can undo it.
+        let resumeAt = max(0, livePosition(at: Date()))
+        loadCurrent(
+            playingIndex, startAt: resumeAt, refreshAutoplay: false,
+            freshResolution: true, preservePlaybackIntent: true
+        )
+    }
+
     var playbackSourceName: String? {
         guard let current else { return nil }
         return PlaybackSourceLabel.name(
@@ -23,6 +67,15 @@ extension PlaybackController {
     }
 
     func noteResolved(_ entry: QueueEntry, outcome: ResolveOutcome, prefs: ResolvePrefs) {
+        if OfflinePlaybackPolicy.isEnabled {
+            outcome.leftover?.cancel()
+            resolvedOrigin[entry.id] = outcome.source.origin
+            sourceDecisionNotes[entry.id] = outcome.source.origin == .local || outcome.source.origin == .cache
+                ? "Playing saved audio in offline mode."
+                : OfflinePlaybackPolicy.unavailableMessage
+            racingLossless = false
+            return
+        }
         resolvedOrigin[entry.id] = outcome.source.origin
         sourceDecisionNotes[entry.id] = outcome.decisionNote
         if let videoId = outcome.source.youtubeVideoId { resolvedVideoIds[outcome.source.source] = videoId }
@@ -68,7 +121,7 @@ extension PlaybackController {
     }
 
     func lookForBetterCopy(_ entry: QueueEntry, codec: String, kbps: UInt32) {
-        guard NetworkQuality.shared.connected else { return }
+        guard NetworkQuality.shared.connected, !OfflinePlaybackPolicy.isEnabled else { return }
         guard !entry.isLocal, entry.source.hasPrefix("yt:") else { return }
         let mediaId = entry.id
         // A pinned track is held off the automatic search on purpose: the
@@ -136,6 +189,11 @@ extension PlaybackController {
     private func startUpgradeJob(
         entry: QueueEntry, prefs: ResolvePrefs, shelved: QualityUpgrade.Candidate?
     ) {
+        guard !OfflinePlaybackPolicy.isEnabled else {
+            QualityUpgrade.forget(entry.id)
+            racingLossless = false
+            return
+        }
         let mediaId = entry.id
         upgradeFor = mediaId
         let generation = playGeneration

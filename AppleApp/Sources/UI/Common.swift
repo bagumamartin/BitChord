@@ -756,6 +756,12 @@ struct SongRow: View {
     private var titleLines: Int? { dynamicTypeSize.isAccessibilitySize ? 2 : 1 }
 
     private var active: Bool { isCurrent || controller.current?.id == entry.id }
+    private var likeStatus: String? {
+        let _ = LikeStore.shared.epoch
+        guard let videoId = entry.videoId else { return nil }
+        let status = LibraryActions.cachedLike(videoId)
+        return status == "LIKE" ? "LIKE" : (status == "DISLIKE" ? "DISLIKE" : "INDIFFERENT")
+    }
     /// Whether this is the window's selected row.
     private var isSelected: Bool {
         #if os(macOS)
@@ -803,27 +809,24 @@ struct SongRow: View {
         // as they did when the row was a Button.
         .accessibilityAction { play() }
         .accessibilityAction(named: "Play") { play() }
+        .accessibilityAction(named: "Play Next") {
+            (playNext ?? { controller.playNext(entry) })()
+            toast.queueNotice("Playing next: \(entry.title)")
+        }
+        .accessibilityAction(named: "Add to Queue") {
+            (addToQueue ?? { controller.addToQueue(entry) })()
+            toast.queueNotice("Added to queue: \(entry.title)")
+        }
         #endif
         .songContextMenu(entry, playlistBrowseId: playlistBrowseId, playlistOwned: playlistOwned)
         #if os(iOS)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            let playNext = PlatformSettings.shared.getBoolean(key: "swipe_to_play_next", default: false)
-            if playNext {
-                Button { (self.playNext ?? { controller.playNext(entry) })() } label: {
-                    Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-                }
-                .tint(.orange)
-            } else {
-                Button { (self.addToQueue ?? { controller.addToQueue(entry) })() } label: {
-                    Label("Queue", systemImage: "text.badge.plus")
-                }
-                .tint(.blue)
-            }
+            let preferPlayNext = PlatformSettings.shared.getBoolean(key: "swipe_to_play_next", default: false)
+            if !preferPlayNext { queueSwipeAction }
+            playNextSwipeAction
+            if preferPlayNext { queueSwipeAction }
             if auth.signedIn, let vid = entry.videoId {
                 Button {
-                    // Through the controller, so this row's heart reports a
-                    // refusal the same way the player's does. It used to call
-                    // `rate` directly and discard the answer.
                     controller.toggleLike(videoId: vid)
                 } label: {
                     Label(LibraryActions.cachedLike(vid) == "LIKE" ? "Unlike" : "Like", systemImage: LibraryActions.cachedLike(vid) == "LIKE" ? "heart.fill" : "heart")
@@ -851,6 +854,27 @@ struct SongRow: View {
         #endif
     }
 
+    #if os(iOS)
+    private var playNextSwipeAction: some View {
+        Button {
+            (playNext ?? { controller.playNext(entry) })()
+            toast.queueNotice("Playing next: \(entry.title)")
+        } label: {
+            Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+        }
+        .tint(.orange)
+    }
+
+    private var queueSwipeAction: some View {
+        Button {
+            (addToQueue ?? { controller.addToQueue(entry) })()
+            toast.queueNotice("Added to queue: \(entry.title)")
+        } label: {
+            Label("Add to Queue", systemImage: "text.badge.plus")
+        }
+        .tint(.blue)
+    }
+    #endif
     /// The lane itself, shared by both platforms' interaction wrappers.
     private var rowContent: some View {
         HStack(spacing: 12) {
@@ -892,6 +916,39 @@ struct SongRow: View {
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            if let likeStatus {
+                Image(systemName: likeStatus == "LIKE" ? "heart.fill" : (likeStatus == "DISLIKE" ? "hand.thumbsdown.fill" : "heart"))
+                    .font(.caption)
+                    .foregroundStyle(likeStatus == "LIKE" ? Color.pink : Color.secondary.opacity(0.65))
+                    .accessibilityHidden(true)
+            }
+            #if os(macOS)
+            if hovering {
+                HStack(spacing: 4) {
+                    Button {
+                        (playNext ?? { controller.playNext(entry) })()
+                        toast.queueNotice("Playing next: \(entry.title)")
+                    } label: {
+                        Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                            .frame(width: 24, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Play Next")
+                    .accessibilityLabel("Play Next")
+                    Button {
+                        (addToQueue ?? { controller.addToQueue(entry) })()
+                        toast.queueNotice("Added to queue: \(entry.title)")
+                    } label: {
+                        Image(systemName: "text.badge.plus")
+                            .frame(width: 24, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add to Queue")
+                    .accessibilityLabel("Add to Queue")
+                }
+                .foregroundStyle(.secondary)
+            }
+            #endif
             Image(.bchChevronRight)
                 .resizable()
                 .scaledToFit()
@@ -921,6 +978,9 @@ struct SongRow: View {
         var parts = [entry.title]
         if !entry.artist.isEmpty { parts.append(entry.artist) }
         if let duration = entry.durationText, !duration.isEmpty { parts.append(duration) }
+        if likeStatus != nil {
+            parts.append(likeStatus == "LIKE" ? "Liked" : (likeStatus == "DISLIKE" ? "Disliked" : "Not liked"))
+        }
         if buffering { parts.append("Buffering") }
         if let activity = DownloadStore.shared.activity(for: entry) { parts.append(activity.label) }
         return parts.joined(separator: ", ")
@@ -1021,7 +1081,7 @@ struct ThinSlider: View {
         .frame(height: 34)
         .accessibilityElement()
         .accessibilityLabel(label)
-        .accessibilityValue(NowPlayingView.timestamp(current))
+        .accessibilityValue("\(NowPlayingView.timestamp(current)) of \(NowPlayingView.timestamp(maximum))")
         // One second per increment, five seconds per decrement, matching what
         // Music does and what a seek bar is expected to feel like when driven from
         // a screen reader rather than a drag.
