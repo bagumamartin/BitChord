@@ -9,6 +9,28 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.6</title>
+            <pubDate>Wed, 11 Nov 2026 11:28:57 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.6</sparkle:fullReleaseNotesLink>
+            <sparkle:version>15</sparkle:version>
+            <sparkle:shortVersionString>1.0.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.6
+
+## Now Playing
+
+- A title too long for the player no longer widens it. On iPhone the player stayed pushed past the right edge, and on Mac the title spilled past the left. Long titles now stay in their column and scroll.
+
+## Updates
+
+- Release notes now cover every version you skipped. The update sheet lists each release between your version and the latest, newest first, and the first launch after an update shows what changed since the version you last ran.
+- Release notes are formatted: headings, lists, bold text, links and commands display properly instead of as raw Markdown.
+- **Mac:** **Check for Updates…** is in the BitChord menu.
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.6/BitChord-1.0.6-build15-mac-arm64.dmg" length="19185385" type="application/octet-stream" sparkle:edSignature="xoFt+884h3gDggafASt4ZMVxb7Qpqa0UthL8ftckE008/Vk+eCaABcQTHUEiFoMztvtaeS73MgC6/sheOsm3Cw=="/>
+        </item>
+        <item>
             <title>1.0.5</title>
             <pubDate>Wed, 11 Nov 2026 11:06:08 +0100</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.5</sparkle:fullReleaseNotesLink>
@@ -114,28 +136,9 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.4/BitChord-1.0.4-build13-mac-arm64.dmg" length="19108712" type="application/octet-stream" sparkle:edSignature="O8oOzE6813XZXeKW4rHhGV1xY+/10ehvoHY0Gzi0UugaD5T8aTyMQ+Lx+TfAFPTbqLhnvU19h7zb9QMZGY9JBA=="/>
         </item>
-        <item>
-            <title>1.0.3</title>
-            <pubDate>Sun, 25 Oct 2026 21:27:37 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.3</sparkle:fullReleaseNotesLink>
-            <sparkle:version>7</sparkle:version>
-            <sparkle:shortVersionString>1.0.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.3
-
-## Sound
-
-- Automix blends no longer open with a hissy stretch where neither song has its kick or bass line. The next song's low end now arrives as the previous song lets go of its own.
-- Removed a tiny skip, about 3 ms, that came once in each Automix song shortly after the blend.
-- Tempo matching during a blend is smoother on dense, bass-heavy records, uses about half the processing power, and lets go of the tempo sooner after the blend. Tempo differences too small to hear are no longer matched at all.
-
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.3/BitChord-1.0.3.dmg" length="37237661" type="application/octet-stream" sparkle:edSignature="Nz0MVmkgHaAXkcolpEiWktGlyhduyeduITMZz/Q1Y/SDDhCZRR1KSeOFdbvYGjQ/mfD1MdZtcirtwhDaJ2YFDQ=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: ilzRuPivONcXvvs1sel7+PsbZ1Yomh6AnJcnXfjBonN/nJcaIPOiccIbQwBRqRxRo2w0f7ROqpc3bcbNAIYIDw==
-length: 9336
+edSignature: UmZCUauScEpuQ9pYxbZbFdDPWlFh+jcELiSiw31uQe7p3mPT0OXXaEDlsa5TLViaGjrn3teGxyx/joZh8oMIDw==
+length: 9490
 -->
