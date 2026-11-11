@@ -86,14 +86,6 @@ struct AppReleaseUpdate: Identifiable {
     var id: String { identity.key }
     var version: String { identity.version }
 
-    var displayNotes: String {
-        let text = (notes ?? "").split(separator: "\n", omittingEmptySubsequences: false).filter { line in
-            let value = line.trimmingCharacters(in: .whitespaces)
-            return !(value.hasPrefix("![") && value.contains("](") && value.hasSuffix(")"))
-        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? "No release notes were supplied." : text
-    }
-
     /// Ambiguous legacy packages are deliberately left for the release page.
     static func legacyAsset(platform: String, assets: [ReleaseAsset], version: String? = nil) -> ReleaseAsset? {
         let suffix = platform == "ios" ? ".ipa" : ".dmg"

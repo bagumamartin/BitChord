@@ -130,6 +130,9 @@ enum UpdateAcknowledgementStore {
 struct UpdateSheet: View {
     let release: AppReleaseUpdate
     @Environment(\.dismiss) private var dismiss
+    /// Every release between the installed version and this one, so someone
+    /// who skipped several updates sees all of their notes, not only the last.
+    @State private var missed: [ReleaseNotesEntry] = []
     var body: some View {
         NavigationStack {
             Form {
@@ -139,10 +142,19 @@ struct UpdateSheet: View {
                     if let date = release.publishedAt { LabeledContent("Published on", value: date.formatted(date: .abbreviated, time: .omitted)) }
                     if let revision = release.revision { LabeledContent("Revision", value: revision) }
                 }
-                Section("What’s New") { Text(release.displayNotes).textSelection(.enabled) }
+                if missed.isEmpty {
+                    Section("What’s New") { ReleaseNotesView(markdown: release.notes ?? "") }
+                } else {
+                    ReleaseNotesSections(entries: missed)
+                }
                 Section("Installation") { ReleaseInstallationView(release: release) }
             }
             .formStyle(.grouped)
+            .task {
+                let installed = UpdateChecker.shared.currentIdentity.version
+                guard release.identity.compared(to: UpdateChecker.shared.currentIdentity) == .newer else { return }
+                missed = await ReleaseHistory.entries(after: installed, through: release.version) ?? []
+            }
             .navigationTitle("Release Details")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }

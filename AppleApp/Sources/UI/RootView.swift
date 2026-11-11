@@ -17,6 +17,7 @@ struct RootView: View {
     @Environment(AuthController.self) private var auth
     @Environment(ToastCenter.self) private var toast
     @State private var updateChecker = UpdateChecker.shared
+    @State private var whatsNew = WhatsNewCenter.shared
     #if os(macOS)
     /// Which side panel is open beside the library, if any (M4).
     @State private var macInspector: MacInspectorKind?
@@ -200,10 +201,16 @@ struct RootView: View {
             }
             Button("Later", role: .cancel) { updateChecker.dismiss() }
         } message: {
-            Text("BitChord \(updateChecker.available?.identity.label ?? "") is available. Update using the same method you used to install BitChord. The release page has the change notes.")
+            Text("BitChord \(updateChecker.available?.identity.label ?? "") is available. Update using the same method you used to install BitChord. View Update shows what changed since your version.")
         }
         .sheet(item: $updateDetails) { release in UpdateSheet(release: release) }
         #endif
+        .sheet(isPresented: Binding(
+            get: { !whatsNew.entries.isEmpty },
+            set: { if !$0 { whatsNew.entries = [] } }
+        )) {
+            WhatsNewSheet(entries: whatsNew.entries)
+        }
         .onChange(of: tabBinding.wrappedValue) { old, new in
             #if os(iOS)
             // A regular-width iPad's field is a button that opens into a pill

@@ -112,6 +112,7 @@ struct BitChordApp: App {
                     // screen side effect. On iPhone and iPad this raises the update
                     // alert wherever the listener starts; on Mac the About row and
                     // the update sheet remain available.
+                    Task { await WhatsNewCenter.shared.checkAfterLaunch() }
                     #if os(iOS)
                     Task { await UpdateChecker.shared.pollOnce() }
                     #else
@@ -281,6 +282,7 @@ struct BitChordApp: App {
             SidebarCommands()
             PlaybackCommands(controller: controller, appModel: appModel, auth: auth, toast: toast)
             MiniPlayerCommands()
+            UpdateCommands()
         }
 #endif
 #if os(macOS)

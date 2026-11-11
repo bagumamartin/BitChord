@@ -28,6 +28,15 @@ final class MacUpdateManager {
     }
 }
 
+/// BitChord ▸ Check for Updates…, under About as in other Mac apps.
+struct UpdateCommands: Commands {
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") { MacUpdateManager.shared.checkNow() }
+        }
+    }
+}
+
 struct MacUpdateSettings: View {
     @State private var manager = MacUpdateManager.shared
     @State private var checksAutomatically = true
