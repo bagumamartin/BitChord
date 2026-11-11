@@ -131,4 +131,43 @@ class StreamResolverRecoveryTest {
             assertEquals(listOf(64, Int.MAX_VALUE), ceilings)
         }
     }
+
+    private fun refused(vararg outcomes: String) = com.metrolist.innertubex.extraction.StreamResolveException(
+        reason = com.metrolist.innertubex.extraction.StreamResolveException.Reason.NO_PLAYABLE_STREAM,
+        message = "No playable stream found for this track.",
+        diagnostics = com.metrolist.innertubex.extraction.StreamDiagnostics(
+            attempts = outcomes.mapIndexed { i, outcome ->
+                com.metrolist.innertubex.extraction.StreamAttemptDiagnostic("CLIENT$i", null, "ua", outcome)
+            },
+            usedAuthenticatedWatchPage = true,
+        ),
+    )
+
+    /** Issue 17: a signed-in failure that wasn't a bot check must not be reported as one. */
+    @Test fun signedInFailureWithoutLoginRequiredIsNotABotCheck() = runTest {
+        fixture {
+            Innertube.cookie = "SAPISID=synthetic"
+            StreamResolver.extraction = { _, _ ->
+                throw refused("selection:po_token", "playability:UNPLAYABLE", "request:IOException")
+            }
+            val error = assertFails { StreamResolver.resolve("signed-in-miss") }
+            assertIs<com.metrolist.innertubex.extraction.StreamResolveException>(error)
+            // And nothing is held back afterwards: the next track is asked for.
+            var asked = false
+            StreamResolver.extraction = { id, _ -> asked = true; stream(id) }
+            assertNotNull(StreamResolver.resolve("next"))
+            assertTrue(asked)
+        }
+    }
+
+    @Test fun signedInBotCheckSaysSoWithoutAskingToSignIn() = runTest {
+        fixture {
+            Innertube.cookie = "SAPISID=synthetic"
+            StreamResolver.extraction = { _, _ ->
+                throw refused("playability:LOGIN_REQUIRED", "playability:LOGIN_REQUIRED")
+            }
+            val error = assertFailsWith<StreamResolver.BotCheckException> { StreamResolver.resolve("challenged") }
+            assertTrue(error.message!!.contains("even signed in"))
+        }
+    }
 }

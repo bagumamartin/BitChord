@@ -91,17 +91,52 @@ actor OfflineArtworkStore {
               let data = read(Self.coverURL(audioPath: audioPath)), Self.digest(data) == record.sha256 else { return nil }
         return data
     }
-    func cachedData(url: String, headers: [String: String]) -> Data? {
+    /// The size a request asks for, from its `w…-h…` segment, capped at what
+    /// [normalized] keeps. Zero when the URL names no size.
+    nonisolated static func requestedPixels(_ url: String) -> Int {
+        guard let match = url.firstMatch(of: #/w(\d+)-h(\d+)/#),
+              let width = Int(match.1), let height = Int(match.2) else { return 0 }
+        return min(1200, max(width, height))
+    }
+
+    /// A saved cover for this artwork at least as large as the request, or nil.
+    ///
+    /// The key deliberately ignores the size segment, so every rendition of one
+    /// cover shares a file. That made the first size ever fetched — often the
+    /// 88-pixel list thumbnail — the answer for every later size too, and the
+    /// player, the lock screen and the menu bar drew that thumbnail scaled up
+    /// (issue 12). A smaller saved cover is now only a stand-in: it is returned
+    /// when `acceptSmaller` says the caller has no better way to get one (no
+    /// network, or the fetch failed).
+    func cachedData(url: String, headers: [String: String], acceptSmaller: Bool = false) -> Data? {
         let key = Self.key(url: url, headers: headers)
+        let needed = Self.requestedPixels(url)
+        var standIn: (data: Data, pixels: Int)?
+        func consider(_ data: Data) -> Data? {
+            let pixels = Self.pixels(data) ?? 0
+            if pixels >= needed { return data }
+            if pixels > (standIn?.pixels ?? -1) { standIn = (data, pixels) }
+            return nil
+        }
         loadOwners()
         for path in owners?[key] ?? [] {
             if let metadata = read(Self.recordURL(path), limit: 4096),
                let record = try? JSONDecoder().decode(Record.self, from: metadata), record.key == key,
-               let data = data(audioPath: path) { return data }
+               let data = data(audioPath: path) {
+                if let hit = consider(data) { return hit }
+                continue
+            }
             owners?[key]?.remove(path)
         }
         let canonical = imageDirectory.appendingPathComponent("cover-" + key)
-        if let data = read(canonical), Self.pixels(data) != nil { DiskCache.touch(canonical); return data }
+        if let data = read(canonical), Self.pixels(data) != nil {
+            DiskCache.touch(canonical)
+            if let hit = consider(data) { return hit }
+            // Already asked the CDN for this size or more and this is what it
+            // had: some covers simply are small, and asking again on every
+            // view would be a fetch per row for nothing.
+            if asked(canonical) >= needed { return data }
+        }
         // Recover covers already written by older versions, including a smaller
         // thumbnail when the larger player/lock-screen rendition was never fetched.
         let variants = [url] + [1200, 900, 600, 544, 480, 320, 256, 176, 132, 120, 112, 88].map {
@@ -111,16 +146,41 @@ actor OfflineArtworkStore {
         for variant in variants where seen.insert(variant).inserted {
             let legacyKey = Self.digest(variant + headers.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: "\u{0}"))
             if let data = read(imageDirectory.appendingPathComponent(legacyKey), limit: 8 * 1024 * 1024),
-               let normalized = cache(data: data, url: url, headers: headers) { return normalized }
+               let normalized = cache(data: data, url: url, headers: headers, asked: Self.requestedPixels(variant)),
+               let hit = consider(normalized) { return hit }
         }
-        return nil
+        return acceptSmaller ? standIn?.data : nil
     }
-    @discardableResult func cache(data: Data, url: String, headers: [String: String]) -> Data? {
+    /// The largest size the CDN has been asked for this cover, beside it.
+    private func asked(_ cover: URL) -> Int {
+        guard let data = read(cover.appendingPathExtension("asked"), limit: 16),
+              let text = String(data: data, encoding: .utf8) else { return 0 }
+        return Int(text) ?? 0
+    }
+    private func noteAsked(_ pixels: Int, for cover: URL) {
+        guard pixels > asked(cover) else { return }
+        try? Data(String(pixels).utf8).write(to: cover.appendingPathExtension("asked"), options: .atomic)
+    }
+
+    /// `asked` is the size the bytes were fetched at, when that is not the size
+    /// `url` names — a legacy file recovered for a larger request was never
+    /// asked for at the larger size, and must not be remembered as if it were.
+    @discardableResult func cache(data: Data, url: String, headers: [String: String], asked: Int? = nil) -> Data? {
         guard let image = Self.normalized(data) else { return nil }
         try? FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
         let file = imageDirectory.appendingPathComponent("cover-" + Self.key(url: url, headers: headers))
+        // Never trade a larger saved rendition for a smaller one: a list
+        // thumbnail fetched after the player's cover would otherwise put the
+        // thumbnail back in its place.
+        if let existing = read(file), let saved = Self.pixels(existing),
+           saved > (Self.pixels(image) ?? 0) {
+            DiskCache.touch(file)
+            noteAsked(asked ?? Self.requestedPixels(url), for: file)
+            return existing
+        }
         try? image.write(to: file, options: .atomic)
         DiskCache.allowLockedPlayback(file)
+        noteAsked(asked ?? Self.requestedPixels(url), for: file)
         if Date().timeIntervalSince(lastTrim) > 60 {
             lastTrim = Date(); DiskCache.trimFolder(imageDirectory, limitBytes: 128 * 1024 * 1024)
         }
@@ -164,10 +224,11 @@ enum OfflineArtwork {
         guard let url = entry.thumbnailUrl else { return nil }
         if LocalArtwork.isReference(url) { return await LocalArtwork.shared.data(for: url) }
         let headers = WebDavBridge.shared.playbackHeaders(fileUrl: url)
-        if let saved = await store.cachedData(url: url, headers: headers) { return saved }
-        guard allowNetwork, !Task.isCancelled else { return nil }
         let sized = url.replacingOccurrences(of: #"w\d+-h\d+"#, with: "w544-h544", options: .regularExpression)
-        return await ArtworkRequests.shared.data(url: sized, headers: headers)
+        if let saved = await store.cachedData(url: sized, headers: headers, acceptSmaller: !allowNetwork) { return saved }
+        guard allowNetwork, !Task.isCancelled else { return nil }
+        if let fetched = await ArtworkRequests.shared.data(url: sized, headers: headers) { return fetched }
+        return await store.cachedData(url: sized, headers: headers, acceptSmaller: true)
     }
     static func preserve(_ entry: QueueEntry, audioPath: String, store: OfflineArtworkStore = .shared, allowNetwork: Bool = true) async {
         if let url = entry.thumbnailUrl, LocalArtwork.isReference(url), let path = URL(string: url)?.path,

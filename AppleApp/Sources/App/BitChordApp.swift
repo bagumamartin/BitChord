@@ -319,8 +319,10 @@ struct BitChordApp: App {
                 .environment(toast)
                 .environment(party)
         } label: {
-            Image(systemName: "music.note")
-                .symbolEffect(.pulse, isActive: controller.isPlaying)
+            Image(systemName: controller.isPlaying ? "waveform" : "music.note")
+                // Static: a pulsing status item redraws the menu bar for as
+                // long as music plays, which is CPU in the app and in the
+                // WindowServer for an icon nobody is looking at.
         }
         .menuBarExtraStyle(.window)
 #endif

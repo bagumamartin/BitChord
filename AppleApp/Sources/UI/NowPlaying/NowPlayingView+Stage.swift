@@ -14,12 +14,11 @@ import AppKit
 // The stage: artwork or lyrics, the side panel, and the playback deck.
 extension NowPlayingView {
     var desktopLyricsPane: some View {
-        TimelineView(.animation(minimumInterval: nil, paused: !controller.isPlaying)) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
-                position: controller.livePosition(at: timeline.date),
+                clock: lyricsClock,
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
@@ -38,7 +37,10 @@ extension NowPlayingView {
                 artworkData: controller.current?.artworkData,
                 artworkUrl: controller.current?.thumbnailUrl
             )
-        }
+    }
+
+    var lyricsClock: LyricsClock {
+        LyricsClock(playing: controller.isPlaying) { [controller] in controller.livePosition(at: $0) }
     }
 
     /// Everything above the deck: the artwork, or whichever panel is open.
@@ -204,19 +206,16 @@ extension NowPlayingView {
         case .main:
             Color.clear
         case .lyrics:
-            // Frame-driven, not poll-driven. `controller.position` only moves
-            // when the transport tick reads the engine — four times a second —
-            // so a word highlight judged against it can only change on those
-            // four ticks, and steps in 250 ms jumps. Upstream drives the pane
-            // from a frame clock for exactly this reason. The interpolated
-            // position is still the engine's measurement; the TimelineView only
-            // decides how often we ask where it has got to.
-            TimelineView(.animation(minimumInterval: nil, paused: !controller.isPlaying)) { timeline in
+            // The pane gets the clock, not a position: only the line being
+            // sung reads it every frame (upstream drives the sweep from a frame
+            // clock too), and the list redraws once per line. Handing it a
+            // position from a frame-rate TimelineView redrew the whole list on
+            // every display frame.
             LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
-                position: controller.livePosition(at: timeline.date),
+                clock: lyricsClock,
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
@@ -237,7 +236,6 @@ extension NowPlayingView {
                 artworkData: controller.current?.artworkData,
                 artworkUrl: controller.current?.thumbnailUrl
             )
-            }
         case .queue:
             UpNextPane(
                 showsCurrentTrackHeader: showsQueueCurrentTrackHeader,
@@ -277,24 +275,14 @@ extension NowPlayingView {
             // title and the sung line sitting over the queue is this codebase's
             // invention, and it is what buried the list.
             if pane == .main { creditsRow }
-            // The playback-origin caption / nerd line, hidden behind
-            // `hide_song_status` exactly as upstream hides it.
-            if pane == .main, showsPlaybackStatusLine, let status = songStatusLine {
-                Button { showPipeline = true } label: { Text(status) }
-                    .buttonStyle(.plain)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
-                    .padding(.horizontal, 24)
-                    .accessibilityLabel(status)
-            }
-            // Phones keep the lyric strip in the main and queue panes. On iPad
-            // the larger lyric/queue pane already has that space, so the pinned
-            // deck stays focused on seek and playback controls.
-            if pane != .lyrics && !isIPad { currentLyricStrip }
-            positionControls
+            // The sung line sits above the scrubber whenever the lyrics pane
+            // itself is not showing it — iPad included: a player that knows
+            // the words and only shows them behind a button reads as having
+            // none.
+            if pane != .lyrics { currentLyricStrip }
+            // The playback-origin caption rides in the timestamp row, on the
+            // main player only, still hidden by `hide_song_status`.
+            positionControls(showsStatus: pane == .main)
                 .padding(.horizontal, 32)
             playerTransport
             // The volume capsule between transport and toggles, flanked by

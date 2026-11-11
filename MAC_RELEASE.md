@@ -25,8 +25,13 @@ xcodebuild \
 mkdir -p "$TMPDIR/BitChord-mac-export"
 ditto "$TMPDIR/BitChord-mac.xcarchive/Products/Applications/BitChord.app" \
   "$TMPDIR/BitChord-mac-export/BitChord.app"
+ditto "$TMPDIR/BitChord-mac.xcarchive/dSYMs" "$TMPDIR/BitChord-mac-export/dSYMs"
 scripts/package-mac-dmg.sh 1.0.0 "$TMPDIR/BitChord-mac-export"
 ```
+
+The script refuses an export whose `dSYMs` folder has no match for the app, and
+zips the folder beside the DMG. Keep that zip with the release's local files so
+a later report can be symbolicated. Do not upload it: it carries local paths.
 
 The script checks the app version, stages a copy, removes provisioning profiles
 and old signatures, then ad-hoc signs nested code inside-out without `--deep`.

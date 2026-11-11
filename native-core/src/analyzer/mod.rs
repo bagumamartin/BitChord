@@ -120,6 +120,11 @@ pub fn resample_with(input: &[f32], input_rate: f64, output_rate: f64, zero_cros
     let mut output = vec![0.0f32; output_count];
     let last = input.len() as i64 - 1;
 
+    if let Some((phases, advance)) = rational_phases(input_rate, output_rate) {
+        resample_phased(input, &mut output, &kernel, half_width, phases, advance, input_rate / output_rate);
+        return output;
+    }
+
     for (index, out) in output.iter_mut().enumerate() {
         let centre = index as f64 / ratio;
         let first_tap = (centre - half_width).ceil() as i64;
@@ -147,6 +152,100 @@ pub fn resample_with(input: &[f32], input_rate: f64, output_rate: f64, zero_cros
         };
     }
     output
+}
+
+/// Phase count and per-cycle input advance for integer rates whose output
+/// grid repeats against the input: 44.1k → 22.05k is one phase, 48k → 22.05k
+/// is 147 phases advancing 320 input samples per cycle.
+///
+/// The interpolated kernel lookups depend only on where an output sample falls
+/// between input samples, so within one phase every output uses the same taps
+/// at the same weights. The generic loop rebuilt those weights (an interpolated
+/// table lookup per tap, ~140 taps) for every output sample, which made this
+/// function most of the analysis thread's time.
+fn rational_phases(input_rate: f64, output_rate: f64) -> Option<(usize, i64)> {
+    const MAX_PHASES: u64 = 4096;
+    if input_rate.fract() != 0.0 || output_rate.fract() != 0.0 || input_rate > 1e7 || output_rate > 1e7 {
+        return None;
+    }
+    let (input, output) = (input_rate as u64, output_rate as u64);
+    let divisor = gcd(input, output);
+    let phases = output / divisor;
+    (phases <= MAX_PHASES).then(|| (phases as usize, (input / divisor) as i64))
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The generic loop's arithmetic with the weights computed once per phase.
+/// Same kernel, same taps, same f64 accumulation in the same order; only the
+/// output's position is taken from an exact integer phase rather than from
+/// `index / ratio` in floating point, which differs from it in the last bit.
+fn resample_phased(
+    input: &[f32],
+    output: &mut [f32],
+    kernel: &[f64],
+    half_width: f64,
+    phases: usize,
+    advance: i64,
+    step: f64,
+) {
+    let table_size = kernel.len();
+    let last = input.len() as i64 - 1;
+    struct Phase {
+        first_tap: i64,
+        weights: Vec<f64>,
+        weight_sum: f64,
+    }
+    let table: Vec<Phase> = (0..phases)
+        .map(|phase| {
+            let centre = phase as f64 * step;
+            let first_tap = (centre - half_width).ceil() as i64;
+            let last_tap = (centre + half_width).floor() as i64;
+            let mut weights = Vec::with_capacity((last_tap - first_tap + 1).max(0) as usize);
+            let mut weight_sum = 0.0;
+            for tap in first_tap..=last_tap {
+                let scaled = (centre - tap as f64).abs() * 512.0;
+                let slot = scaled as usize;
+                let weight = if slot + 1 >= table_size {
+                    0.0
+                } else {
+                    let fraction = scaled - slot as f64;
+                    kernel[slot] + fraction * (kernel[slot + 1] - kernel[slot])
+                };
+                weights.push(weight);
+                weight_sum += weight;
+            }
+            Phase { first_tap, weights, weight_sum }
+        })
+        .collect();
+
+    for (index, out) in output.iter_mut().enumerate() {
+        let phase = &table[index % phases];
+        let first = phase.first_tap + (index / phases) as i64 * advance;
+        let end = first + phase.weights.len() as i64 - 1;
+        let mut sum = 0.0;
+        if first >= 0 && end <= last {
+            let window = &input[first as usize..=end as usize];
+            for (weight, sample) in phase.weights.iter().zip(window) {
+                sum += weight * *sample as f64;
+            }
+        } else {
+            for (offset, weight) in phase.weights.iter().enumerate() {
+                let clamped = (first + offset as i64).clamp(0, last) as usize;
+                sum += weight * input[clamped] as f64;
+            }
+        }
+        *out = if phase.weight_sum != 0.0 {
+            (sum / phase.weight_sum) as f32
+        } else {
+            0.0
+        };
+    }
 }
 
 fn sinc(x: f64) -> f64 {
@@ -413,6 +512,28 @@ mod tests {
         assert_eq!(out.len(), 22_050);
         for v in &out[100..out.len() - 100] {
             assert!((v - 0.5).abs() < 1e-3, "dc drift {v}");
+        }
+    }
+
+    /// The phase-table path against the generic loop it replaces: a rate a
+    /// hair off an integer takes the generic loop, and the two must agree to
+    /// well under anything a spectrogram can see.
+    #[test]
+    fn phased_resampler_matches_the_generic_loop() {
+        let input: Vec<f32> = (0..48_000)
+            .map(|i| {
+                let t = i as f64;
+                ((t * 0.0371).sin() * 0.6 + (t * 0.113).sin() * 0.3 + ((i * 7919 % 101) as f64 / 101.0 - 0.5) * 0.1) as f32
+            })
+            .collect();
+        for (from, to) in [(48_000.0, 22_050.0), (44_100.0, 22_050.0), (32_000.0, 22_050.0), (96_000.0, 22_050.0)] {
+            assert!(rational_phases(from, to).is_some(), "{from} → {to} should be phased");
+            let fast = resample(&input, from, to);
+            let generic = resample(&input, from + 1e-7, to);
+            // The nudged rate can floor one sample shorter; compare the overlap.
+            assert!(fast.len().abs_diff(generic.len()) <= 1, "{from} → {to}");
+            let worst = fast.iter().zip(&generic).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-5, "{from} → {to}: worst difference {worst}");
         }
     }
 

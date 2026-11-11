@@ -58,7 +58,17 @@ final class ToastCenter {
     private let dwell: Duration = .seconds(3)
 
     func show(_ message: String, kind: Notice.Kind = .success, action: Action? = nil) {
-        show(message, kind: kind, action: action, dwell: dwell)
+        show(message, kind: kind, action: action, dwell: Self.readingDwell(message, floor: dwell))
+    }
+
+    /// Long enough to read the whole message: a short confirmation keeps the
+    /// usual three seconds, an explanation of what went wrong (YouTube's bot
+    /// check, a lost session) gets about a second per twelve characters, up to
+    /// ten. A sentence that is gone before the end of it has been read is a
+    /// sentence nobody can act on.
+    static func readingDwell(_ message: String, floor: Duration) -> Duration {
+        let seconds = min(10, max(Double(floor.components.seconds), 1.5 + Double(message.count) / 12))
+        return .milliseconds(Int(seconds * 1000))
     }
 
     /// Upstream `QueueActionNotice`: the transient "Playing next …" / "Added to
@@ -140,7 +150,10 @@ struct ToastHost: View {
             if let notice = center.current {
                 ToastBanner(notice: notice)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .padding(.bottom, 8)
+                    // On the Mac, clear of the floating playback pill (88pt
+                    // band, see `MacPillInset`): sitting on it, a wrapped
+                    // failure covered the transport it was reporting on.
+                    .padding(.bottom, Self.bottomClearance)
                     .padding(.horizontal, 16)
             }
         }
@@ -161,6 +174,12 @@ struct ToastHost: View {
             }
         }
     }
+
+    #if os(macOS)
+    private static let bottomClearance: CGFloat = 96
+    #else
+    private static let bottomClearance: CGFloat = 8
+    #endif
 
     private var trackLogBinding: Binding<QueueEntry?> {
         Binding(
@@ -186,10 +205,13 @@ private struct ToastBanner: View {
             Image(systemName: symbol)
                 .font(.callout)
                 .foregroundStyle(tint)
+            // Never truncated: the failure messages are the ones that say what
+            // to do, and their advice is in the last clause (issue 17).
             Text(notice.message)
                 .font(.callout)
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
             if let action = notice.action {
                 Button(action.title) {
                     action.perform()
@@ -197,17 +219,26 @@ private struct ToastBanner: View {
                 }
                 .buttonStyle(.plain)
                 .font(.callout.weight(.semibold))
-            }        }
+            }
+        }
         .padding(.vertical, 10)
         .padding(.horizontal, 14)
-        .background(.regularMaterial, in: .capsule)
+        // A capsule only suits one line; a wrapped message in one has its
+        // first and last lines cut into by the ends.
+        .background(.regularMaterial, in: shape)
         .overlay {
-            Capsule().strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+            shape.strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
         .frame(maxWidth: 420)
+        // The whole message on hover too, as issue 17 asked.
+        .help(notice.message)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isStaticText)
+    }
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: notice.message.count > 48 ? 18 : 22, style: .continuous)
     }
 
     private var symbol: String {

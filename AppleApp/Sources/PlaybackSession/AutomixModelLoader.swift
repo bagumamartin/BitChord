@@ -22,14 +22,27 @@ enum AutomixModelPolicy {
 actor AutomixModelLoader {
     static let shared = AutomixModelLoader()
 
+    /// The Core ML model the analyzer holds, by the archive it came from.
+    ///
+    /// Every reload (playback start, the Automix toggle, a performance mode
+    /// change, the model store's refresh) used to compile a fresh `MLModel`
+    /// while the analyzer still held the last one, so for the length of the
+    /// load two copies of the Neural Engine program — hundreds of megabytes of
+    /// device buffers each — were resident together. The model is now kept
+    /// while its archive is unchanged, and the old one is let go before a
+    /// different one is loaded.
+    private var registered: (identity: String, model: BeatThisCoreML)?
+
     func configure(beat: String, vocal: String, accelerator: AutomixAccelerator?) async -> Bool {
         let ready = configureAnalyzer(beatModelPath: beat, vocalModelPath: vocal)
         guard ready, !beat.isEmpty, let accelerator else {
-            setBeatAccelerator(accelerator: nil, identity: "")
+            release()
             return ready
         }
+        if registered?.identity == accelerator.identity { return ready }
+        release()
         if let model = BeatThisCoreML(modelURL: accelerator.modelURL) {
-            setBeatAccelerator(accelerator: model, identity: accelerator.identity)
+            register(model, identity: accelerator.identity)
             return ready
         }
         // A compiled model an OS update invalidated: rebuild once from the
@@ -37,10 +50,24 @@ actor AutomixModelLoader {
         // rebuild itself runs off the main actor inside the store.
         let rebuilt = await AutomixModelStore.shared.recompileBeatCoreML()
         if let rebuilt, let model = BeatThisCoreML(modelURL: rebuilt.modelURL) {
-            setBeatAccelerator(accelerator: model, identity: rebuilt.identity)
+            register(model, identity: rebuilt.identity)
         } else {
-            setBeatAccelerator(accelerator: nil, identity: "")
+            release()
         }
         return ready
+    }
+
+    private func register(_ model: BeatThisCoreML, identity: String) {
+        setBeatAccelerator(accelerator: model, identity: identity)
+        registered = (identity, model)
+    }
+
+    private func release() {
+        guard registered != nil else {
+            setBeatAccelerator(accelerator: nil, identity: "")
+            return
+        }
+        registered = nil
+        setBeatAccelerator(accelerator: nil, identity: "")
     }
 }

@@ -206,4 +206,34 @@ class LyricsMatchingTest {
             ),
         )
     }
+
+    @Test
+    fun `a KuGou hit by another artist with the same title is rejected`() {
+        // Lee Hi's "NO ONE" came back for Sean Paul's at a matching length.
+        assertNull(
+            LyricsMatching.candidateScore(
+                wantedTitle = "No One", wantedArtist = "Sean Paul, Amanda Reifer", wantedDurationMs = 0L,
+                candidateTitle = "NO ONE (NO ONE)(Feat. B.I of iKON)", candidateArtist = "李遐怡、B.I",
+                requireArtist = true,
+            ),
+        )
+        assertNotNull(
+            LyricsMatching.candidateScore(
+                wantedTitle = "No One", wantedArtist = "Sean Paul & Amanda Reifer", wantedDurationMs = 0L,
+                candidateTitle = "No One", candidateArtist = "Sean Paul、Amanda Reifer",
+                requireArtist = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `lyrics in a script the track never uses are rejected`() {
+        val korean = listOf(LyricLineDto(0, "누구 없소"), LyricLineDto(2_000, "나를 붙잡아줄 님은 없소"))
+        val english = listOf(LyricLineDto(0, "When yuh bend yuh back"), LyricLineDto(2_000, "girl, when yuh"))
+        assertFalse(LyricsMatching.scriptFits("No One", "Sean Paul", korean))
+        assertTrue(LyricsMatching.scriptFits("No One", "Sean Paul", english))
+        assertTrue(LyricsMatching.scriptFits("누구 없소 (NO ONE)", "이하이", korean))
+        // English hooks in a Korean song are fine either way round.
+        assertTrue(LyricsMatching.scriptFits("Dynamite", "BTS", english + LyricLineDto(4_000, "빛나")))
+    }
 }

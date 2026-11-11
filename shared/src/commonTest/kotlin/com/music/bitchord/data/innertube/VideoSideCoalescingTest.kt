@@ -62,7 +62,10 @@ class VideoSideCoalescingTest {
                 loads++
                 entered.complete(Unit)
                 release.await()
-                null
+                // A real answer, not null: the second ask runs on the bridge's
+                // own dispatcher and can arrive after the flight has landed,
+                // and a null answer is deliberately not cached, so it flaked.
+                side()
             }
         ) {
             val first = async { ask("coalesce-shared") }

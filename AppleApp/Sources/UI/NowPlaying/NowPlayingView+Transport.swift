@@ -13,7 +13,12 @@ import AppKit
 
 // Position, volume and transport controls, the More menu, and nerd stats.
 extension NowPlayingView {
-    var positionControls: some View {
+    var positionControls: some View { positionControls(showsStatus: true) }
+
+    /// The scrubber with its timestamps. `showsStatus` puts the playback-source
+    /// caption ("YouTube · Opus") in the timestamp row, centred between the two
+    /// times, instead of on a line of its own above the deck.
+    func positionControls(showsStatus: Bool) -> some View {
         VStack(spacing: 6) {
             ThinSlider(
                 value: controller.position,
@@ -30,10 +35,23 @@ extension NowPlayingView {
             )
             .tint(.white)
 
-            HStack {
+            HStack(spacing: 8) {
+                // Equal-width time columns keep the caption on the true centre.
                 Text(Self.timestamp(controller.position))
-                Spacer()
+                    .frame(minWidth: 48, alignment: .leading)
+                Spacer(minLength: 0)
+                if showsStatus, showsPlaybackStatusLine, let status = songStatusLine {
+                    Button { showPipeline = true } label: { Text(status) }
+                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityLabel(status)
+                    Spacer(minLength: 0)
+                }
                 Text(remainingLabel)
+                    .frame(minWidth: 48, alignment: .trailing)
             }
             .font(.caption.monospacedDigit().weight(.medium))
             .foregroundStyle(.white.opacity(0.7))

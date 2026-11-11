@@ -73,8 +73,14 @@ struct ArtworkView: View {
         // Keyed on the track, so a row that scrolls round and comes back as a
         // different track re-resolves instead of showing the previous one's cover.
         .task(id: remoteId) {
+            // Drop the previous track's cover first: a track without a remote id
+            // (or one whose cover isn't extracted yet) would otherwise keep
+            // drawing it, since `embedded` outranks the URL below.
+            embedded = nil
             guard let remoteId else { return }
-            embedded = await EmbeddedArtwork.embeddedCoverData(id: remoteId)
+            let bytes = await EmbeddedArtwork.embeddedCoverData(id: remoteId)
+            guard !Task.isCancelled else { return }
+            embedded = bytes
         }
     }
 
@@ -280,6 +286,14 @@ final class ArtworkCache: @unchecked Sendable {
         #endif
     }
 
+    private static func longestSide(_ image: PlatformImage) -> Int {
+        #if os(iOS)
+        return max(image.cgImage?.width ?? 0, image.cgImage?.height ?? 0)
+        #else
+        return Int(max(image.size.width, image.size.height))
+        #endif
+    }
+
     private func imageCost(_ image: PlatformImage) -> Int {
         #if os(iOS)
         return (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
@@ -291,6 +305,12 @@ final class ArtworkCache: @unchecked Sendable {
     private func readFromDisk(_ url: String) -> PlatformImage? {
         let file = diskURL(url)
         guard let data = try? Data(contentsOf: file), let image = Self.decode(data, url: url) else { return nil }
+        // 1.0.4 could save a list thumbnail under a player-sized URL (issue 12).
+        // A copy well under the size its URL asks for is passed over, so the
+        // load goes back through the artwork store, which now only answers
+        // with a cover at least that large (or the CDN's best).
+        let requested = min(1200, OfflineArtworkStore.requestedPixels(url))
+        if requested > 0, Self.longestSide(image) * 10 < requested * 9 { return nil }
         memory.setObject(image, forKey: cacheKey(url) as NSString, cost: imageCost(image))
         return image
     }

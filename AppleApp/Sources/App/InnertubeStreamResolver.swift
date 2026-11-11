@@ -135,8 +135,31 @@ final class InnertubeStreamResolver: Sendable {
             ((error as? StreamError)?.raw ?? "\(error)").localizedCaseInsensitiveContains("not a bot")
         }
 
+        /// What clears YouTube's bot check, for the device in hand. Signing in
+        /// is the reliable way out — YouTube's own message asks for exactly
+        /// that — and a Mac has no mobile data to switch to.
+        static var botCheckAdvice: String { botCheckAdvice(signedIn: false) }
+
+        /// Signed in, the check is YouTube's view of the network rather than of
+        /// the account, so "sign in" is not advice; signing out and back in is,
+        /// because an account session YouTube has stopped trusting reads the same.
+        static func botCheckAdvice(signedIn: Bool) -> String {
+            #if os(macOS)
+            let network = "Try another network (a phone hotspot works)"
+            #else
+            let network = "Switch between Wi-Fi and mobile data"
+            #endif
+            if signedIn {
+                return "YouTube is asking this network to confirm it isn’t a bot, even with your account signed in, so it isn’t serving audio right now. \(network), or wait a few minutes. If it keeps happening, sign out of YouTube Music in Settings and sign back in."
+            }
+            return "YouTube is asking this network to confirm it isn’t a bot, so it isn’t serving audio right now. Sign in to YouTube Music in Settings. \(network), or wait a few minutes."
+        }
+
         static func say(_ raw: String) -> String {
             let said = raw.lowercased()
+            if said.contains("not a bot") && said.contains("even signed in") {
+                return botCheckAdvice(signedIn: true)
+            }
             if said.contains("signed-in playback:") {
                 return "Your signed-in session could not be restored. Check your connection or sign in again."
             }
@@ -144,7 +167,7 @@ final class InnertubeStreamResolver: Sendable {
                 return "Playback is temporarily unavailable. Try again shortly."
             }
             if said.contains("not a bot") {
-                return "YouTube is asking this network to confirm it isn’t a bot, so it won’t serve audio for now. Switching between Wi-Fi and mobile data, or waiting a while, usually clears it."
+                return botCheckAdvice
             }
             if said.contains("sign in") {
                 return "YouTube is asking this device to sign in before it will serve anything. That is YouTube's gate rather than anything to do with the track."

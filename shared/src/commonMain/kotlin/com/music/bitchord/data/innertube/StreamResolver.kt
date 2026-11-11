@@ -1,5 +1,6 @@
 package com.music.bitchord.data.innertube
 import com.music.bitchord.data.DebugLog
+import com.metrolist.innertubex.extraction.StreamResolveException
 import com.music.bitchord.data.http.ProbeResult
 import com.music.bitchord.data.http.Http
 import com.music.bitchord.data.http.RawHttpBytes
@@ -41,10 +42,10 @@ object StreamResolver {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                if (isBotChecked(videoId)) throw BotCheckException()
+                if (isBotChecked(videoId, e)) throw BotCheckException(signedIn = Innertube.cookie != null)
                 throw e
             } ?: run {
-                if (isBotChecked(videoId)) throw BotCheckException()
+                if (isBotChecked(videoId, null)) throw BotCheckException(signedIn = Innertube.cookie != null)
                 error("No playable stream for $videoId")
             }
             Innertube.checkSession(generation)
@@ -90,14 +91,55 @@ object StreamResolver {
      * by one anonymous player request, and then nothing more is asked of
      * YouTube for [BOT_CHECK_BACKOFF] — a network change or a little patience
      * is what clears it.
+     *
+     * `signedIn` says the verdict came back for the account's own requests, so
+     * the listener is not told to sign in when they already are.
      */
-    class BotCheckException : IllegalStateException(
-        "YouTube asks this network to sign in to confirm it is not a bot"
+    class BotCheckException(signedIn: Boolean = false) : IllegalStateException(
+        if (signedIn) "YouTube asks this network to confirm it is not a bot, even signed in"
+        else "YouTube asks this network to sign in to confirm it is not a bot"
     )
     private val botCheckedUntil = AtomicReference<TimeMark?>(null)
     private val BOT_CHECK_BACKOFF = 120.seconds
 
-    private suspend fun isBotChecked(videoId: String): Boolean {
+    /**
+     * Whether [failure] was YouTube's bot check, judged by the identity that
+     * actually asked.
+     *
+     * The extraction's own per-client outcomes come first: a bot check shows as
+     * every client that was really asked answering `LOGIN_REQUIRED`. The
+     * anonymous probe below is only evidence for an anonymous listener. Asked
+     * on a signed-in listener's behalf it speaks for a different identity —
+     * anonymous requests from a busy address are challenged long before the
+     * account's are — and it used to turn every signed-in failure (a stale
+     * player config, a refused client) into "confirm you're not a bot", then
+     * hold every track behind that verdict for two minutes, skipping the
+     * session rebuild that would have fixed the real problem.
+     */
+    private suspend fun isBotChecked(videoId: String, failure: Throwable?): Boolean {
+        val asked = (failure as? StreamResolveException)?.diagnostics?.attempts.orEmpty()
+            .filterNot { it.outcome.startsWith("selection:") }
+        val signedIn = Innertube.cookie != null
+        val allLoginRequired = asked.isNotEmpty() && asked.all { it.outcome == "playability:LOGIN_REQUIRED" }
+        val verdict = when {
+            signedIn -> allLoginRequired
+            asked.isNotEmpty() && !allLoginRequired -> false
+            else -> anonymousProbeSaysBot(videoId)
+        }
+        if (!verdict) {
+            if (signedIn && asked.isNotEmpty()) {
+                DebugLog.d("$videoId: signed-in extraction failed without a bot check: " +
+                    asked.joinToString { "${it.clientName}=${it.outcome}" })
+            }
+            return false
+        }
+        botCheckedUntil.store(TimeSource.Monotonic.markNow() + BOT_CHECK_BACKOFF)
+        DebugLog.w("YouTube is bot-checking this network${if (signedIn) " (signed in)" else ""}; " +
+            "not asking again for ${BOT_CHECK_BACKOFF.inWholeSeconds}s")
+        return true
+    }
+
+    private suspend fun anonymousProbeSaysBot(videoId: String): Boolean {
         val reason = try {
             val body = Http.client.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false") {
                 contentType(ContentType.Application.Json)
@@ -120,10 +162,7 @@ object StreamResolver {
         } catch (_: Throwable) {
             return false
         }
-        if (!reason.contains("not a bot", ignoreCase = true)) return false
-        botCheckedUntil.store(TimeSource.Monotonic.markNow() + BOT_CHECK_BACKOFF)
-        DebugLog.w("YouTube is bot-checking this network; not asking again for ${BOT_CHECK_BACKOFF.inWholeSeconds}s")
-        return true
+        return reason.contains("not a bot", ignoreCase = true)
     }
 
     fun onSessionChanged() {

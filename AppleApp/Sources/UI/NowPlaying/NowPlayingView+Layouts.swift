@@ -231,15 +231,12 @@ extension NowPlayingView {
                 VStack(spacing: 12) {
                     creditsRow
 
-                    if showsPlaybackStatusLine, let status = songStatusLine {
-                        Button { showPipeline = true } label: { Text(status) }
-                            .buttonStyle(.plain)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
-                            .padding(.horizontal, 16)
+                    // The line being sung, as the phone shows it, while the
+                    // lyrics column is closed. With the column open it would
+                    // print the same line twice, side by side.
+                    if pane != .lyrics {
+                        currentLyricStrip
+                            .padding(.horizontal, 12)
                     }
 
                     positionControls

@@ -96,7 +96,7 @@ extension PlaybackController {
         position = 0
         if let entry = current {
             if !sameSong {
-                refreshArtwork(entry)
+                refreshArtwork(entry, source: info.source)
                 fetchLyrics(for: entry)
                 fetchCanvas(for: entry)
             }

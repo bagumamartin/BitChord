@@ -62,7 +62,7 @@ extension PlaybackController {
         automaticSkips = 0
         state = .playing
         persistSession()
-        refreshArtwork(entry)
+        refreshArtwork(entry, source: info.source)
         fetchLyrics(for: entry)
         fetchCanvas(for: entry)
         applySpatialPreference()

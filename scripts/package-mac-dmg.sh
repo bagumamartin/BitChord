@@ -11,6 +11,7 @@ Usage:
 Options:
   --output-dir DIR  Write BitChord-VERSION-buildBUILD-mac-arm64.dmg to DIR (default: export-folder)
   --overwrite       Replace an existing local DMG with the same name
+  --no-dsyms        Package without archiving debug symbols (local test builds only)
   --publish         Upload an asset to an existing GitHub release
   --replace-asset   Replace the same-named asset (requires --publish)
   --create-release  Create a new GitHub release from an existing vVERSION tag
@@ -20,6 +21,11 @@ Options:
 The export is copied before processing and remains untouched. The DMG contains
 no provisioning profile, Developer ID signature, or iCloud entitlement. GitHub
 changes require confirmation; new releases require an existing pushed tag.
+
+The export folder must also hold the archive's dSYMs in a folder named dSYMs.
+They are checked against the app and zipped beside the DMG as
+BitChord-VERSION-buildBUILD-mac-arm64.dSYMs.zip, so a report against this build
+can be symbolicated later. The zip is never uploaded: it carries local paths.
 USAGE
 }
 
@@ -28,11 +34,12 @@ if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then usage; exit 0; f
 [[ $# -ge 2 ]] || { usage >&2; exit 2; }
 version="$1"; export_dir="$2"; shift 2
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-output_dir=""; overwrite=0; publish=0; create_release=0; replace_asset=0; notes_file=""
+output_dir=""; overwrite=0; publish=0; create_release=0; replace_asset=0; notes_file=""; skip_dsyms=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir) [[ $# -ge 2 ]] || fail "--output-dir needs a path"; output_dir="$2"; shift 2 ;;
     --overwrite) overwrite=1; shift ;;
+    --no-dsyms) skip_dsyms=1; shift ;;
     --publish) publish=1; shift ;;
     --replace-asset) replace_asset=1; shift ;;
     --create-release) create_release=1; shift ;;
@@ -55,11 +62,14 @@ build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$input_pli
 dmg_name="BitChord-$version-build$build_version-mac-arm64.dmg"
 dmg_path="$output_dir/$dmg_name"
 [[ ! -e "$dmg_path" || "$overwrite" -eq 1 ]] || fail "DMG already exists: $dmg_path (pass --overwrite to replace it)"
+dsym_source="$export_dir/dSYMs"
+dsym_zip_path="$output_dir/BitChord-$version-build$build_version-mac-arm64.dSYMs.zip"
+[[ "$skip_dsyms" -eq 1 || ! -e "$dsym_zip_path" || "$overwrite" -eq 1 ]] || fail "dSYM archive already exists: $dsym_zip_path (pass --overwrite to replace it)"
 [[ -z "$notes_file" || -f "$notes_file" ]] || fail "release notes file does not exist: $notes_file"
 [[ -z "$notes_file" || "$publish" -eq 1 || "$create_release" -eq 1 ]] || fail "--notes requires --publish or --create-release"
 [[ "$create_release" -eq 0 || -n "$notes_file" ]] || fail "--create-release requires --notes FILE"
 
-for tool in ditto codesign otool install_name_tool sips tiffutil hdiutil create-dmg osascript file lipo; do
+for tool in ditto codesign otool install_name_tool sips tiffutil hdiutil create-dmg osascript file lipo dwarfdump; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool not found: $tool"
 done
 [[ -x /usr/libexec/PlistBuddy ]] || fail "required tool not found: /usr/libexec/PlistBuddy"
@@ -87,6 +97,15 @@ build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")"
 app_executable="$app_source/Contents/MacOS/$executable"
 [[ -f "$app_executable" ]] || fail "app executable not found: $app_executable"
+if [[ "$skip_dsyms" -eq 0 ]]; then
+  [[ -d "$dsym_source" ]] || fail "no dSYMs in the export: copy the archive's dSYMs folder to $dsym_source, or pass --no-dsyms for a local test build"
+  # Signing and install_name_tool below leave the Mach-O UUID alone, so the
+  # export's UUID is the one a crash report or sample of the shipped app will carry.
+  app_uuid="$(dwarfdump --uuid "$app_executable" | awk '/arm64/ {print $2; exit}')"
+  [[ -n "$app_uuid" ]] || fail "could not read the arm64 UUID of $app_executable"
+  dsym_uuids="$(find "$dsym_source" -type f -path '*.dSYM/Contents/Resources/DWARF/*' -exec dwarfdump --uuid {} + | awk '{print $2}')"
+  grep -Fxq "$app_uuid" <<<"$dsym_uuids" || fail "no dSYM in $dsym_source matches the app (UUID $app_uuid)"
+fi
 icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist" 2>/dev/null || true)"
 [[ -n "$icon_name" ]] || icon_name="AppIcon"
 [[ "$icon_name" == *.icns ]] || icon_name="$icon_name.icns"
@@ -309,6 +328,11 @@ hdiutil convert "$rw_image" -format UDZO -imagekey zlib-level=9 -o "$candidate" 
 hdiutil verify "$candidate" >/dev/null
 mv -f "$candidate" "$dmg_path"
 printf 'Created and verified: %s\n' "$dmg_path"
+if [[ "$skip_dsyms" -eq 0 ]]; then
+  ditto -c -k --norsrc "$dsym_source" "$stage/dSYMs.zip"
+  mv -f "$stage/dSYMs.zip" "$dsym_zip_path"
+  printf 'Archived debug symbols (keep private, do not upload): %s\n' "$dsym_zip_path"
+fi
 
 if [[ "$publish" -eq 1 ]]; then
   tag="v$version"

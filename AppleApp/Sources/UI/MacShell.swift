@@ -56,7 +56,13 @@ struct MacPillInset: ViewModifier {
 
     func body(content: Content) -> some View {
         GeometryReader { proxy in
-            let compact = windowWidth < 900 || (windowWidth > 0 && proxy.size.width > windowWidth - 120)
+            // Only a window that is actually narrow gets the icon bar over the
+            // pill. Keying it off a collapsed sidebar too put an iPhone-style
+            // tab bar on top of the pill in a full-width window, and the
+            // window's width reads 0 until AppKit reports it, which flashed
+            // the bar on every page's first frame. A collapsed sidebar is one
+            // click on the toolbar's sidebar button away.
+            let compact = windowWidth > 0 && windowWidth < 900
             content.safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: compact ? 8 : 0) {
                     if compact {
@@ -393,20 +399,22 @@ struct MacInspectorPane: View {
 
 /// Lyrics in the inspector, on the same clock the player uses.
 ///
-/// `TimelineView` rather than a timer: the pane reads the position on each tick
-/// and never owns a clock of its own, exactly as the player's lyrics do.
+/// The pane is handed the controller's clock and never owns one of its own,
+/// exactly as the player's lyrics are.
 private struct MacLyricsInspector: View {
     @Environment(PlaybackController.self) private var controller
     @State private var offsetMs = LyricsOffsetBridge.offsetMs()
     @State private var showProviderPicker = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.25, paused: !controller.isPlaying)) { timeline in
-            LyricsPane(
+        LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
-                position: controller.livePosition(at: timeline.date),
+                clock: LyricsClock(playing: controller.isPlaying) { [controller] in
+                    controller.livePosition(at: $0)
+                },
+                fontSize: 24,
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
@@ -421,7 +429,6 @@ private struct MacLyricsInspector: View {
                 artworkData: controller.current?.artworkData,
                 artworkUrl: controller.current?.thumbnailUrl
             )
-        }
         .onReceive(NotificationCenter.default.publisher(for: .lyricsOffsetChanged)) { _ in
             offsetMs = LyricsOffsetBridge.offsetMs()
         }

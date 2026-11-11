@@ -60,6 +60,39 @@ internal object LyricsMatching {
     }
 
     /**
+     * Whether a lyric's script can belong to this track. A title and artist
+     * written only in Latin letters with lyrics that are mostly Hangul, kana or
+     * Han is a different song that shares a title (Sean Paul's "No One" against
+     * Lee Hi's). Mixed tracks — K-pop with English hooks, or a title in its own
+     * script — pass, because the check only fires when the metadata has none of
+     * the lyric's script at all.
+     */
+    fun scriptFits(title: String, artist: String, lines: List<LyricLineDto>): Boolean {
+        if ((title + artist).any(::isEastAsian)) return true
+        var eastAsian = 0
+        var letters = 0
+        lines.forEach { line ->
+            line.text.forEach { c ->
+                if (c.isLetter()) {
+                    letters++
+                    if (isEastAsian(c)) eastAsian++
+                }
+            }
+        }
+        return letters == 0 || eastAsian.toDouble() / letters < 0.3
+    }
+
+    private fun isEastAsian(c: Char): Boolean {
+        val code = c.code
+        return code in 0x1100..0x11FF ||  // Hangul Jamo
+            code in 0x3040..0x30FF ||      // Hiragana, Katakana
+            code in 0x3130..0x318F ||      // Hangul compatibility Jamo
+            code in 0x3400..0x4DBF ||      // CJK extension A
+            code in 0x4E00..0x9FFF ||      // CJK unified ideographs
+            code in 0xAC00..0xD7AF         // Hangul syllables
+    }
+
+    /**
      * Reject a fuzzy provider response whose timeline plainly belongs to a
      * shorter or longer recording. Lenient enough for long outros and video
      * versions; strict enough to catch common same-title wrong-track hits.
@@ -243,7 +276,8 @@ internal object LyricsMatching {
     }
 
     private val ARTIST_SEPARATOR = Regex(
-        """(?i)\s*(?:,|&|;|\s+feat(?:uring)?\.?\s+|\s+ft\.?\s+|\s+with\s+|\s+x\s+)\s*""",
+        // `、` and `，` are how KuGou and other Chinese catalogues join artists.
+        """(?i)\s*(?:,|，|、|&|;|\s+feat(?:uring)?\.?\s+|\s+ft\.?\s+|\s+with\s+|\s+x\s+)\s*""",
     )
     private val ARTICLES = setOf("a", "an", "the")
 }

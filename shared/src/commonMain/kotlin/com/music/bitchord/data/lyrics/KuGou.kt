@@ -22,16 +22,29 @@ object KuGou {
         val keyword = keyword(title, artist, album)
         val seconds = (durationMs / 1000).toInt()
 
-        val candidate = searchSongs(keyword, seconds)?.firstNotNullOfOrNull { hash ->
-            searchLyrics(hash = hash)?.firstOrNull()
-        } ?: searchLyrics(keyword = keyword, seconds = seconds)?.firstOrNull()
+        // Every hit must name this song and this artist. Duration alone let a
+        // same-length song with the same title through — Lee Hi's Korean
+        // "NO ONE" for Sean Paul's — and the keyword fallback had no check at all.
+        // Duration is already filtered by each search, so only names are scored.
+        fun fits(song: String, singer: String) = LyricsMatching.candidateScore(
+            wantedTitle = title, wantedArtist = artist, wantedDurationMs = 0L,
+            candidateTitle = song, candidateArtist = singer, requireArtist = true,
+        ) != null
+
+        val candidate = searchSongs(keyword, seconds)
+            ?.filter { fits(it.songname, it.singername) }
+            ?.firstNotNullOfOrNull { info -> searchLyrics(hash = info.hash)?.firstOrNull() }
+            ?: searchLyrics(keyword = keyword, seconds = seconds)
+                ?.firstOrNull { fits(it.song, it.singer) }
             ?: return null
 
         val lrc = download(candidate.id, candidate.accesskey) ?: return null
-        return LrcLib.parseLrc(lrc).takeIf { it.isNotEmpty() }
+        return LrcLib.parseLrc(lrc).takeIf {
+            it.isNotEmpty() && LyricsMatching.scriptFits(title, artist, it)
+        }
     }
 
-    private suspend fun searchSongs(keyword: Keyword, seconds: Int): List<String>? {
+    private suspend fun searchSongs(keyword: Keyword, seconds: Int): List<SearchSongResponse.Info>? {
         val body = lyricsGet(
             "https://mobileservice.kugou.com/api/v3/search/song",
             query = mapOf(
@@ -46,7 +59,6 @@ object KuGou {
         return response?.data?.info.orEmpty()
             .filter { seconds <= 0 || abs(it.duration - seconds) <= DURATION_TOLERANCE_SECONDS }
             .sortedBy { abs(it.duration - seconds) }
-            .map { it.hash }
     }
 
     private suspend fun searchLyrics(
@@ -130,14 +142,24 @@ object KuGou {
         data class Data(val info: List<Info> = emptyList())
 
         @Serializable
-        data class Info(val hash: String, val duration: Int = -1)
+        data class Info(
+            val hash: String,
+            val duration: Int = -1,
+            val songname: String = "",
+            val singername: String = "",
+        )
     }
 
     @Serializable
     private data class SearchLyricsResponse(val candidates: List<Candidate> = emptyList())
 
     @Serializable
-    private data class Candidate(val id: String, val accesskey: String)
+    private data class Candidate(
+        val id: String,
+        val accesskey: String,
+        val song: String = "",
+        val singer: String = "",
+    )
 
     @Serializable
     private data class DownloadResponse(val content: String = "")

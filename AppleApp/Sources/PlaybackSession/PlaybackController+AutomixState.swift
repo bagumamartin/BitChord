@@ -109,12 +109,16 @@ extension PlaybackController {
         }
     }
 
-    func refreshArtwork(_ entry: QueueEntry) {
-        let local = loadedSourcePath.flatMap { $0.hasPrefix("/") ? LocalArtwork.reference(path: $0) : nil }
+    /// `source` is the audio path the engine is playing *for this entry*. It is
+    /// passed in rather than read from `loadedSourcePath`, because on a handoff
+    /// that property still names the outgoing track when this runs, and reading
+    /// it pinned the previous song's embedded cover onto the new one.
+    func refreshArtwork(_ entry: QueueEntry, source: String?) {
+        let local = source.flatMap { $0.hasPrefix("/") ? LocalArtwork.reference(path: $0) : nil }
         guard let raw = entry.thumbnailUrl ?? local, !raw.isEmpty else { return }
         let sized = SharedArtwork.sized(raw, 544) ?? raw
         let headers = WebDavBridge.shared.playbackHeaders(fileUrl: sized)
-        let sourcePath = loadedSourcePath
+        let sourcePath = source
         Task {
             var saved: Data?
             if let sourcePath { saved = await OfflineArtworkStore.shared.data(audioPath: sourcePath) }

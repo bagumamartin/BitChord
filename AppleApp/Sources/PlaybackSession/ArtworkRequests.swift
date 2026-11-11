@@ -18,7 +18,10 @@ actor ArtworkRequests {
         let task = Task<Data?, Never> { [store, fetch] in
             if LocalArtwork.isReference(url) { return await LocalArtwork.shared.data(for: url) }
             if let saved = await store.cachedData(url: url, headers: headers) { return saved }
-            guard let data = await fetch(url, headers) else { return nil }
+            // Offline, or the CDN refused: a smaller saved cover beats none.
+            guard let data = await fetch(url, headers) else {
+                return await store.cachedData(url: url, headers: headers, acceptSmaller: true)
+            }
             return await store.cache(data: data, url: url, headers: headers)
         }
         flights[key] = task
