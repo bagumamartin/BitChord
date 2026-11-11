@@ -642,6 +642,23 @@ final class AutomixModelStore {
 
     // MARK: - Download
 
+    /// Fetches the replacement for every model the listener already installed
+    /// whose pinned version has moved on.
+    ///
+    /// The listener chose these models; a new pin is a better build of the same
+    /// thing (the Core ML beat model's v2 holds about 370 MB less on the Neural
+    /// Engine), so waiting for a tap in Settings would keep most people on the
+    /// old one indefinitely. The previous graph stays in use until the new one
+    /// verifies, and the usual network rule applies: on a metered connection
+    /// with Wi-Fi-only downloads on, nothing starts and the row still offers
+    /// Update.
+    func updateOutdated() {
+        guard AutomixModelsPolicy.allowMetered else { return }
+        for id in ModelID.allCases {
+            if case .outdated = status(of: id) { start(id, allowMetered: true) }
+        }
+    }
+
     /// Download in the background, cancelable through ``cancel(_:)``.
     func start(_ id: ModelID, allowMetered: Bool) {
         guard !status(of: id).isBusy, !status(of: id).isInstalled else { return }

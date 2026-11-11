@@ -152,6 +152,9 @@ struct BitChordApp: App {
                                 if controller.automixEnabled { controller.syncEngineQueueNext() }
                             }
                         }
+                        // After onChanged is wired, so a finished update reloads
+                        // the analyzer onto the new graph.
+                        AutomixModelStore.shared.updateOutdated()
                         // Engine is started on-demand when the user actually begins
                         // playback (via playQueue, togglePlayPause, or remote commands)
                         // so opening the app never interrupts other audio playing on the device.
