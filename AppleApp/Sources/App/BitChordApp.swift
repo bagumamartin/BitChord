@@ -51,6 +51,7 @@ struct BitChordApp: App {
                 // sheet read the controller, auth and toast models.
                 .background(SettingsDeepLinkOpener())
                 .modifier(MacWindowAccountToolbar())
+                .allowsWindowActivationEvents(true)
                 #endif
                 .environment(controller)
                 .environment(appModel)
@@ -285,6 +286,7 @@ struct BitChordApp: App {
 #if os(macOS)
         WindowGroup(id: MacBrowseWindow.sceneID, for: MacBrowseWindowRoute.self) { $route in
             MacBrowseWindowView(route: route)
+                .allowsWindowActivationEvents(true)
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)
@@ -295,6 +297,7 @@ struct BitChordApp: App {
         .defaultSize(width: 1000, height: 760)
         Window("Mini Player", id: MiniPlayerWindow.id) {
             MiniPlayerView()
+                .allowsWindowActivationEvents(true)
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)
@@ -309,6 +312,7 @@ struct BitChordApp: App {
 
         MenuBarExtra(isInserted: $menuBarPlayer) {
             MiniPlayerView(compact: true)
+                .allowsWindowActivationEvents(true)
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)
@@ -323,6 +327,7 @@ struct BitChordApp: App {
 #if os(macOS)
         Settings {
             SettingsView()
+                .allowsWindowActivationEvents(true)
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)

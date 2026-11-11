@@ -10,6 +10,16 @@ import AppKit
 // Playback: crossfade, AutoMix and its models, and the rest of playback.
 extension SettingsView {
     func buildPlaybackRows(_ rows: inout SettingsRows) {
+        #if os(macOS)
+        rows.row("Single-Click to Play", "single click", "double click", "mouse", "song", "select") {
+            SettingsToggleLine(
+                glyph: .swipe,
+                title: "Single-Click to Play",
+                subtitle: "Play songs with one click. Turn off to select with one click and play with a double-click.",
+                isOn: $singleClickToPlay
+            )
+        }
+        #endif
         rows.row("Crossfade", "blend", "fade", "transition", "gapless", "automix") {
             VStack(alignment: .leading, spacing: 6) {
                 SettingsSliderRow(glyph: .crossfade, title: "Crossfade",
