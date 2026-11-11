@@ -19,9 +19,15 @@ if [[ ! -f "$dmg_path" || ! -f "$notes_path" ]]; then
 fi
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-derived_data="$HOME/Library/Developer/Xcode/DerivedData"
-generate_appcast="$(find "$derived_data" -path '*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast' -type f -print -quit 2>/dev/null || true)"
+# CI passes SPARKLE_GENERATE_APPCAST (the tool's path) and SPARKLE_ED_KEY_FILE
+# (the private EdDSA key exported from the keychain); locally both default to
+# Xcode's resolved package and the keychain item under account BitChord.
+generate_appcast="${SPARKLE_GENERATE_APPCAST:-}"
 if [[ -z "$generate_appcast" ]]; then
+  derived_data="$HOME/Library/Developer/Xcode/DerivedData"
+  generate_appcast="$(find "$derived_data" -path '*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast' -type f -print -quit 2>/dev/null || true)"
+fi
+if [[ -z "$generate_appcast" || ! -x "$generate_appcast" ]]; then
   echo "Sparkle's generate_appcast was not found. Open/resolve AppleApp/BitChord.xcodeproj once in Xcode first." >&2
   exit 1
 fi
@@ -63,8 +69,13 @@ cp "$repo_root/appcast.xml" "$stage/appcast.xml"
 cp "$dmg_path" "$stage/$archive_name"
 cp "$notes_path" "$stage/$notes_name"
 
+if [[ -n "${SPARKLE_ED_KEY_FILE:-}" ]]; then
+  key_args=(--ed-key-file "$SPARKLE_ED_KEY_FILE")
+else
+  key_args=(--account BitChord)
+fi
 "$generate_appcast" \
-  --account BitChord \
+  "${key_args[@]}" \
   --download-url-prefix "$github_repo_url/releases/download/$tag/" \
   --full-release-notes-url "$github_repo_url/releases/tag/$tag" \
   --embed-release-notes \
