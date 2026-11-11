@@ -9,6 +9,53 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.5</title>
+            <pubDate>Wed, 11 Nov 2026 11:06:08 +0100</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.5</sparkle:fullReleaseNotesLink>
+            <sparkle:version>14</sparkle:version>
+            <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.5
+
+## Artist pages
+
+- Artist pages follow the YouTube Music layout: the name over the artwork, then Shuffle, a large Play button and Subscribe.
+- Top songs have their own heading. Each shelf shows five items with **Show all**, and About comes last with the description, subscriber count and monthly listeners.
+- Every credited artist on a song opens their own page, not only the first. Names without a link are matched exactly, or fall back to a search.
+
+## Now Playing
+
+- The title and artist scroll when they don't fit, with the explicit mark, a star and a More button beside them. Tapping the title opens the album.
+- Artwork follows the track that actually loaded, and old embedded artwork is cleared when the track changes.
+- The playback source line sits centred in the timestamp row.
+- **Mac:** opening the player from a pushed page, such as an artist page, no longer hides the sidebar with no way back. Closing the player returns you to that page.
+
+## Loading screens
+
+- Loading placeholders now have the shape of the page they stand in for: Home shelves, library grids, artist and album pages, Explore tiles and song rows. They no longer jump or resize while they shimmer.
+
+## Playback and lyrics
+
+- When playback fails while you are signed in, BitChord no longer asks you to sign in. A bot check is reported only when YouTube says so for every client; otherwise you get network advice.
+- KuGou lyrics must match the track's artist and script, so an English song no longer gets another artist's Korean lyrics.
+- Nested TTML markup no longer leaks into lyrics, and XML comments are ignored.
+- Sign-in to YouTube Music asks which account to use.
+
+## Mac
+
+- Single-click playback is now a setting (single or double click). The first click on an inactive window works, and typing in search keeps spaces and arrow keys.
+- Toasts clear the playback pill, wrap instead of truncating, and stay up long enough to read.
+- The compact navigation bar appears only in narrow windows.
+
+## Requirements
+
+- iOS and iPadOS 18 or later. The IPA is unsigned: sign it with your own signing app and identity.
+- macOS 15 or later on Apple Silicon. The DMG is ad-hoc signed; existing installs update through Sparkle.
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.5/BitChord-1.0.5-build14-mac-arm64.dmg" length="19166787" type="application/octet-stream" sparkle:edSignature="k2wmWYr8wZBsGGighCuW8BR4zfsyCvEPGyiRCp+3j1Goj5oQwwj9fCY3ZoiIbBh8gYL55IIwywl6SMtpNqhCBg=="/>
+        </item>
+        <item>
             <title>1.0.4</title>
             <pubDate>Sun, 01 Nov 2026 21:27:27 +0100</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.4</sparkle:fullReleaseNotesLink>
@@ -86,89 +133,9 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.3/BitChord-1.0.3.dmg" length="37237661" type="application/octet-stream" sparkle:edSignature="Nz0MVmkgHaAXkcolpEiWktGlyhduyeduITMZz/Q1Y/SDDhCZRR1KSeOFdbvYGjQ/mfD1MdZtcirtwhDaJ2YFDQ=="/>
         </item>
-        <item>
-            <title>1.0.2</title>
-            <pubDate>Sun, 25 Oct 2026 20:04:37 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.2</sparkle:fullReleaseNotesLink>
-            <sparkle:version>6</sparkle:version>
-            <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.2
-
-## Playback
-
-- Playback no longer stops when a song can't be played. BitChord now tries several other ways to get the song first, including the same recording from another catalogue you have enabled. Only if all of them fail does it skip to the next song, which it prepares in advance so Automix still blends into it.
-- A song that fails to load no longer stalls the queue. Autoplay and Automix now carry on to the next song.
-- Moving the seek bar while Automix is blending two songs now jumps within the song you're hearing. Before, playback could go silent until the app was restarted.
-- When YouTube asks your network to confirm it isn't a bot, BitChord now says so plainly and pauses its requests, instead of reporting every song as unplayable.
-
-## Sound
-
-- Removed the crackle and hiss on kicks and bass in loud tracks. The default Transparent mode now gently turns down peaks that would go over full scale, instead of clipping them. Everything below full scale plays exactly as before.
-- Automix raises a quieter next song by at most 2 dB, down from 6 dB, so blends don't overload loud masters.
-- On iPhone and iPad, AirPods and other route changes no longer make playback stutter.
-
-## Discord
-
-- Signing in to Discord now captures the session reliably, and the "Listening to" status reconnects on its own after sleep or a network change.
-
-## Addons
-
-- Addon URLs keep their configured paths.
-- On iOS, you can now remove an addon by swiping it, with a confirmation step.
-- Better compatibility with addons: resource manifests, extra metadata field names, and streams that can't be played are declined cleanly.
-
-Thanks to [@Daltonganger](https://github.com/Daltonganger) for the addon fixes in [#2](https://github.com/bagumamartin/BitChord/pull/2), [#3](https://github.com/bagumamartin/BitChord/pull/3) and [#4](https://github.com/bagumamartin/BitChord/pull/4).
-
-## Requirements
-
-- macOS 15 or later on Apple Silicon.
-- iOS or iPadOS 18 or later.
-
-## Downloads and installation
-
-- **Mac:** Apple Silicon DMG. It is ad-hoc signed, not notarized, and not Developer ID signed. Macs already running 1.0.1 can update from within the app.
-- **iOS:** Unsigned IPA for sideloading with AltStore, SideStore, or Sideloadly, or for signing with your own Apple Developer team.
-
-### Install on Mac
-
-Drag BitChord to Applications, then open it. If Gatekeeper blocks the first launch, use either route:
-
-- **System Settings:** Open System Settings → Privacy & Security, scroll to Security, choose **Open Anyway** for BitChord, then confirm **Open** in the warning dialog.
-- **Terminal:** After moving BitChord to Applications, run:
-
-  ```sh
-  xattr -dr com.apple.quarantine "/Applications/BitChord.app"
-  open "/Applications/BitChord.app"
-  ```
-
-### Sideload on iPhone or iPad
-
-1. Install AltStore, SideStore, or Sideloadly and connect the device as required by that tool.
-2. Import the unsigned IPA and sign it with your Apple account or developer team.
-3. Install the signed app and trust the developer profile if iOS asks.
-
-To use iCloud lyrics-choice or sign-in sharing, sign the app with your own team and enable the matching iCloud Key-Value Store and iCloud Keychain capabilities and provisioning profile. Otherwise those features use local device storage.
-
-## Legal
-
-BitChord does not host or provide media. Playback uses configured third-party services and their APIs; availability and terms are controlled by those services. See the [README Disclaimer & Legal Notice](https://github.com/bagumamartin/BitChord/blob/v1.0.2/README.md#disclaimer--legal-notice).
-
-Every GitHub release is built from its tagged commit, and that tag's source archive is the Corresponding Source under GPLv3 §6. The source for this release is the [v1.0.2 tag](https://github.com/bagumamartin/BitChord/tree/v1.0.2).
-
-## Checksums (SHA-256)
-
-```
-6ad88dc1ea397173279ac8f08deab99a9f947af9ecc26da5b9b6a0d74bc03df6  BitChord-1.0.2.dmg
-b96c690b24a491db88a8f7af9272a75c42c39220a15699607d05f1d0df56968b  BitChord-1.0.2-unsigned.ipa
-```
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.2/BitChord-1.0.2.dmg" length="37237019" type="application/octet-stream" sparkle:edSignature="/h9iTJfKy+6dIaOPE0Z6F444BhADFZDacgXkoWQZgs0huvmnztycKF/DUIMZwBBLy1w+L7MIbTlBEpJJuFO0Cg=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: gRAJ9x7OmbTNisX/M5dSZ/51FviLnCtn7B7O6uZftEn0m9k8GI9QCT+XGAuI7MMdJHmI+jWvwmRRmyYgknixBA==
-length: 11123
+edSignature: ilzRuPivONcXvvs1sel7+PsbZ1Yomh6AnJcnXfjBonN/nJcaIPOiccIbQwBRqRxRo2w0f7ROqpc3bcbNAIYIDw==
+length: 9336
 -->
