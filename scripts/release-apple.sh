@@ -50,7 +50,7 @@ work="$repo_root/build/release-work"
 rm -rf "$work"
 mkdir -p "$work"
 
-scripts/package-ios-ipa.sh "$version" --output-dir "$output_dir" --overwrite
+BITCHORD_BUILD_REVISION="$revision" scripts/package-ios-ipa.sh "$version" --output-dir "$output_dir" --overwrite
 
 archive="$work/BitChord-mac.xcarchive"
 xcodebuild \

@@ -40,8 +40,13 @@ archive="$stage/BitChord.xcarchive"
 app="$archive/Products/Applications/BitChord.app"
 staged_app="$stage/package/Payload/BitChord.app"
 
+# scripts/release-apple.sh passes the revision it checked clean, so the IPA and
+# the Mac archive carry the same stamp even if the tree changes mid-build.
+build_revision="${BITCHORD_BUILD_REVISION:-}"
+if [[ -z "$build_revision" ]]; then
 build_revision="$(git -C "$repo_root" rev-parse --short=12 HEAD)"
 if ! git -C "$repo_root" diff --quiet HEAD -- || [[ -n "$(git -C "$repo_root" ls-files --others --exclude-standard)" ]]; then build_revision="$build_revision-dirty"; fi
+fi
 xcodebuild \
   -project "$repo_root/AppleApp/BitChord.xcodeproj" \
   -scheme BitChord \

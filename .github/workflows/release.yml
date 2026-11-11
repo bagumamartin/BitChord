@@ -1,0 +1,139 @@
+# Builds and publishes one Apple release: the unsigned iOS IPA, the ad-hoc
+# signed Mac DMG and the release manifest, then signs the Sparkle appcast and
+# commits it to main.
+#
+# Start it by pushing a tag (git tag v1.0.6 && git push origin v1.0.6) or from
+# the Actions tab. Before either, AppleApp/project.yml must carry the version
+# and a new build number, and release-notes/<version>.md must exist on that
+# commit.
+#
+# Only one secret is needed: SPARKLE_ED_PRIVATE_KEY, the EdDSA key that signs
+# Mac updates. Public releases carry no Apple signing identity.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, e.g. 1.0.6 (must match AppleApp/project.yml)'
+        required: true
+      mode:
+        description: 'build = files only (workflow artifact); draft = draft GitHub release; publish = public release + appcast'
+        type: choice
+        options: [build, draft, publish]
+        default: build
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+      MODE: ${{ github.event_name == 'push' && 'publish' || inputs.mode }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Normalise the version
+        run: |
+          v="${VERSION#v}"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version must look like 1.0.6, got '$VERSION'"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "TAG=v$v" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the release inputs
+        env:
+          HAS_SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY != '' }}
+        run: |
+          [[ -f "release-notes/$VERSION.md" ]] || { echo "::error::release-notes/$VERSION.md is missing"; exit 1; }
+          if [[ "$MODE" != build ]] && gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::GitHub release $TAG already exists"; exit 1
+          fi
+          if [[ "$MODE" == publish && "$HAS_SPARKLE_KEY" != true ]]; then
+            echo "::error::The SPARKLE_ED_PRIVATE_KEY secret is not set"; exit 1
+          fi
+
+      - name: Select Xcode 27
+        run: |
+          xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)"
+          [[ -n "$xcode" ]] || { echo "::error::This runner image has no Xcode 27"; ls -d /Applications/Xcode*.app; exit 1; }
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Install Rust targets and tools
+        run: |
+          rustup target add aarch64-apple-darwin aarch64-apple-ios
+          brew install xcodegen create-dmg
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.konan
+            ~/.cargo/registry
+            ~/.cargo/git
+            native-core/target
+          key: build-${{ runner.os }}-${{ hashFiles('native-core/Cargo.lock', '*.gradle.kts', 'shared/*.gradle.kts','gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: build-${{ runner.os }}-
+
+      - name: Build the release files
+        run: scripts/release-apple.sh "$VERSION" --output-dir build/release
+
+      - name: Keep the files as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitChord-${{ env.VERSION }}
+          path: build/release/
+          retention-days: 14
+
+      - name: Create the GitHub release
+        if: env.MODE != 'build'
+        run: |
+          cd build/release
+          flags=()
+          [[ "$MODE" == draft ]] && flags+=(--draft)
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "BitChord $VERSION" \
+            --notes-file "$GITHUB_WORKSPACE/release-notes/$VERSION.md" \
+            "${flags[@]}" \
+            BitChord-$VERSION-build*-ios-unsigned.ipa \
+            BitChord-$VERSION-build*-mac-arm64.dmg \
+            release.json SHA256.txt INSTALL.md
+
+      - name: Sign the appcast and commit it to main
+        if: env.MODE == 'publish'
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          spm="$RUNNER_TEMP/spm"
+          xcodebuild -resolvePackageDependencies -project AppleApp/BitChord.xcodeproj -clonedSourcePackagesDirPath "$spm" >/dev/null
+          export SPARKLE_GENERATE_APPCAST="$(find "$spm" -path '*/artifacts/sparkle/Sparkle/bin/generate_appcast' -type f -print -quit)"
+          key="$RUNNER_TEMP/sparkle-ed-key"
+          ( umask 077; printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key" )
+          export SPARKLE_ED_KEY_FILE="$key"
+          git fetch origin main
+          git checkout -B main origin/main
+          scripts/generate-mac-appcast.sh "$TAG" build/release/BitChord-$VERSION-build*-mac-arm64.dmg "release-notes/$VERSION.md"
+          rm -f "$key"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add appcast.xml
+          git commit -m "release: appcast for $VERSION"
+          git push origin main
