@@ -757,7 +757,7 @@ final class LoginWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     private static let musicOrigin = "https://music.youtube.com"
     private static let loginURL = URL(string:
         "https://accounts.google.com/ServiceLogin" +
-        "?ltmpl=music&service=youtube&passive=true" +
+        "?ltmpl=music&service=youtube&prompt=select_account" +
         "&continue=https%3A%2F%2Fmusic.youtube.com%2F"
     )!
 }
