@@ -33,7 +33,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A tag pushed for a release that already exists (for example one published
+  # by hand, or created with gh release create) has nothing left to do.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.exists.outputs.skip }}
+    steps:
+      - id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "${{ github.event_name }}" == push ]] && gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists; nothing to build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
     runs-on: macos-26
     timeout-minutes: 120
     env:
