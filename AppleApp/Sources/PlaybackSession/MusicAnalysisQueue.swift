@@ -60,3 +60,42 @@ actor MusicAnalysisQueue {
         // actually stopped; a new foreground request must not overlap it.
     }
 }
+
+/// Turns for the app's heavy, CPU-bound analyses: the transition planner,
+/// Music Understanding, and version alignment (the video map and recording
+/// identity checks).
+///
+/// Each is fine on its own. A track change used to start them together, and
+/// side by side they put the process past a whole core for seconds at a time,
+/// the burst a listener sees in Activity Monitor. None of them is waited on by
+/// sound: a transition already has its safety overlap queued, and a video map
+/// is built ahead of the toggle. Taking turns makes them a little later and
+/// keeps the machine quiet. First come, first served; a job is never nested in
+/// another, so a turn cannot wait on itself.
+actor AnalysisTurns {
+    static let shared = AnalysisTurns()
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    private func acquire() async {
+        guard busy else { busy = true; return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    private func release() {
+        if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
+    }
+
+    /// Runs `job` once no other heavy analysis is running.
+    static func take<T: Sendable>(_ job: @Sendable () async throws -> T) async rethrows -> T {
+        await shared.acquire()
+        do {
+            let value = try await job()
+            await shared.release()
+            return value
+        } catch {
+            await shared.release()
+            throw error
+        }
+    }
+}

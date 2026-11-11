@@ -179,6 +179,7 @@ enum MusicUnderstandingAnalyzer {
             guard !Task.isCancelled, !isGpuSuspended(), await isForeground() else { await session.cancel(); return false }
             // Omit `.instrumentActivity` — its MPS graph aborts the process.
             // Omit `.pace` for the same Metal family until Apple stabilizes it.
+            let wantsRhythm = !AutomixModelLoader.hasNeuralEngineBeatModel
             let result: MusicUnderstandingSession.SessionResult
             do {
                 result = try await withTaskCancellationHandler {
@@ -187,10 +188,15 @@ enum MusicUnderstandingAnalyzer {
                     // in this process after the session is over (rhythm and
                     // key together hold about 90 MB), and the native DSP pass
                     // already produces sections, phrases and the mix points.
-                    // Rhythm is the part worth having: its beat and bar grid
-                    // stands in for the Beat This! pass, so a track it covers
-                    // never runs that model on the Neural Engine at all.
-                    try await session.analyze(for: [.rhythm, .key])
+                    //
+                    // Key is always worth having: it agreed with the native
+                    // key detector on only about a third of 40 cached tracks,
+                    // the rest a fifth or the relative key away, and it costs
+                    // about 1.2 s of CPU. Rhythm runs only when the Neural
+                    // Engine beat model is not loaded: it cost about 5 s of
+                    // CPU per track, and its grid is a fixed tempo at a
+                    // rounded BPM where Beat This! follows the beats.
+                    try await session.analyze(for: wantsRhythm ? [.rhythm, .key] : [.key])
                 } onCancel: {
                     Task { await session.cancel() }
                 }
@@ -200,7 +206,7 @@ enum MusicUnderstandingAnalyzer {
             }
             guard !Task.isCancelled, !isGpuSuspended(), fingerprint == AutomixOverlayCache.fingerprint(forFilePath: path) else { await session.cancel(); return false }
             let overlay = overlay(from: result)
-            AutomixOverlayCache.store(overlay, forFilePath: path, expected: fingerprint)
+            AutomixOverlayCache.store(overlay, rhythmAnalysed: wantsRhythm, forFilePath: path, expected: fingerprint)
             MemoryRelief.soon()
             return seedAutomixAnalysis(path: path, overlay: overlay)
         } catch {

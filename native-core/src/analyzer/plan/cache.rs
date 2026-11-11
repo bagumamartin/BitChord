@@ -625,8 +625,10 @@ pub(super) fn apply_overlay(analysis: &mut Analysis, overlay: &AnalysisOverlay) 
         analysis.mix_in_time = mix_in;
     }
     if !overlay.source.is_empty() {
-        // Keep a blended label when we refused the MU tempo but took structure.
-        if !accept_overlay_tempo && analysis.analysis_source == "beat_this" {
+        // Keep a blended label when the grid stayed the model's: the MU tempo
+        // was refused, or the overlay carried none (key only).
+        let overlay_has_rhythm = overlay_bpm.is_some() || overlay.beats.as_ref().is_some_and(|b| b.len() >= 2);
+        if (!accept_overlay_tempo || !overlay_has_rhythm) && analysis.analysis_source == "beat_this" {
             analysis.analysis_source = "beat_this+music_understanding".into();
         } else {
             analysis.analysis_source = overlay.source.clone();

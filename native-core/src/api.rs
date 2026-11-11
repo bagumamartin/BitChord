@@ -87,6 +87,7 @@ pub(super) fn plan_automix_impl_with_tier_and_phrase_bars(
     phrase_bars: u32,
 ) -> TransitionPlanRec {
     let _inference_budget = crate::analyzer::InferenceBudget::new(tier.inference_threads());
+    let _paced = crate::pace::Paced::arm(tier.analysis_duty());
     let skip_vocals = !tier.runs_vocal_model();
     let empty_headers = std::collections::HashMap::new();
     if skip_vocals {
@@ -443,6 +444,8 @@ pub(super) fn decode_region_pcm_impl(
     headers: &std::collections::HashMap<String, String>,
     target_rate: Option<u32>,
 ) -> Result<crate::records::DecodedPcm, String> {
+    // Only the lyrics feed asks for regions; it is background work.
+    let _paced = crate::pace::Paced::arm(Some(crate::pace::BACKGROUND_DUTY));
     let mut pcm: Vec<u8> = Vec::new();
     let (sample_rate, start) = stream_mono(
         source, start_seconds, duration_seconds, headers, target_rate,
@@ -468,7 +471,9 @@ pub(super) fn write_analysis_wav_impl(
     target_rate: Option<u32>,
 ) -> Result<(), String> {
     use std::io::{Seek, SeekFrom, Write};
-    let limit = if max_seconds.is_finite() && max_seconds > 0.0 { max_seconds } else { 4.0 * 3600.0 };
+    // Only Music Understanding reads these files, in the background.
+    let _paced = crate::pace::Paced::arm(Some(crate::pace::BACKGROUND_DUTY));
+    let limit =if max_seconds.is_finite() && max_seconds > 0.0 { max_seconds } else { 4.0 * 3600.0 };
     let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut out = std::io::BufWriter::with_capacity(256 * 1024, file);
     out.write_all(&[0u8; 44]).map_err(|e| e.to_string())?;

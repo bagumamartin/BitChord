@@ -1,7 +1,7 @@
 //! One track's analysis, as the planner reads it: tempo, grid, energy, vocals
 //! and key, folded from the DSP and model passes.
 
-use super::beat::{Grid, WINDOW_SECONDS};
+use super::beat::{head_window_seconds, Grid};
 use super::cache::{apply_overlay, overlays};
 use super::{audio_analysis, resample, vocal, MIN_DECODED_FRACTION};
 use crate::analyzer::beat;
@@ -79,9 +79,9 @@ pub(super) fn analyze(
         ..Analysis::default()
     };
     let head_len = if duration > 0.0 {
-        WINDOW_SECONDS.min(duration)
+        head_window_seconds().min(duration)
     } else {
-        WINDOW_SECONDS
+        head_window_seconds()
     };
 
     // Whole-track DSP analysis — envelope, tempo (PLL), key/chroma, spectral
@@ -181,10 +181,10 @@ pub(super) fn analyze(
     // Skipped when an external rhythm grid is already seeded for this file
     // (Music Understanding, OS 27+): `apply_overlay` below replaces the beats
     // and bars with that grid anyway, so the Beat This! pass would be computed
-    // only to be thrown away — and on the Neural Engine it is the costliest
-    // thing a transition does, about 430 MB of device buffers held for the
-    // length of the burst. The DSP grid above stays, and is what the overlay's
-    // octave check compares against.
+    // only to be thrown away. The host asks for that grid only when the Neural
+    // Engine model is not loaded, which is when this pass would run on the CPU.
+    // The DSP grid above stays, and is what the overlay's octave check
+    // compares against.
     let overlay_has_grid = overlays::get(path).is_some_and(|o| {
         o.beats.as_ref().is_some_and(|b| b.len() >= 2)
             && o.downbeats.as_ref().is_some_and(|d| !d.is_empty())

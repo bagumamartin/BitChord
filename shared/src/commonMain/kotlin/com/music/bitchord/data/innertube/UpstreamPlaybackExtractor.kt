@@ -142,6 +142,10 @@ internal object UpstreamPlaybackExtractor {
             }
             val store = RemotePlayerConfigStore(Http.client, repository, logger)
             val cipher = YouTubeCipherService(Http.client, store, logger)
+            cipher.setPreprocessedPlayerCache(
+                read = { PreprocessedPlayerStore.read(it) },
+                write = { key, value -> PreprocessedPlayerStore.write(key, value) },
+            )
             val extractor = InnerTubeExtractor(
                 configParser = com.metrolist.innertubex.extraction.YtConfigParserImpl(Http.client, tube, store, cipherService = cipher),
                 cipherService = cipher, innerTube = tube, tokenProvider = PlaybackTokenBridge.tokenProvider(), logger = logger)

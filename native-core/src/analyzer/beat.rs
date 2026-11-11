@@ -11,6 +11,23 @@ use rten_tensor::NdTensor;
 pub const CHUNK_FRAMES: usize = 1500;
 pub const BORDER_FRAMES: usize = 6;
 pub const WINDOW_SECONDS: f64 = (CHUNK_FRAMES - 2 * BORDER_FRAMES) as f64 / 50.0;
+/// The head window when the accelerator is registered: a few frames past one
+/// whole chunk. [`WINDOW_SECONDS`] spectrograms to 1489 frames, eleven short of
+/// the accelerator's fixed 1500, so every head-window pass fell back to rten
+/// and ran the transformer on the CPU as one uninterruptible 1.7 s step — the
+/// tallest spike in a transition. The extra 0.3 s of audio is inside the
+/// model's own training window; rten still gets [`WINDOW_SECONDS`] so its
+/// variable-length pass costs what it always did.
+pub const ACCELERATED_WINDOW_SECONDS: f64 = (CHUNK_FRAMES + 4) as f64 / FRAME_RATE;
+
+/// The head window for the backend that will read it.
+pub fn head_window_seconds() -> f64 {
+    if models::accelerator().is_some() {
+        ACCELERATED_WINDOW_SECONDS
+    } else {
+        WINDOW_SECONDS
+    }
+}
 const PEAK_WINDOW: i32 = 7;
 /// Frames two accepted peaks must be apart; see [`pick_peaks`].
 const PEAK_MIN_SPACING: i32 = 6;
@@ -76,7 +93,7 @@ pub fn track(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<Grid>
     best_grid(
         grid_from_pcm(pcm, sample_rate, offset_seconds),
         || {
-            let head_samples = (WINDOW_SECONDS * sample_rate).round() as usize;
+            let head_samples = (head_window_seconds() * sample_rate).round() as usize;
             // Already the head window (or shorter): there is nothing to retry.
             (head_samples > 0 && head_samples < pcm.len())
                 .then(|| grid_from_pcm(&pcm[..head_samples], sample_rate, offset_seconds))
@@ -247,11 +264,14 @@ fn infer_accelerated(
     let mut beat_logits = vec![0.0f32; frames];
     let mut downbeat_logits = vec![0.0f32; frames];
     for chunk in plan {
-        let window = values
-            .get(chunk.start * mels..(chunk.start + chunk.length) * mels)?
-            .to_vec();
+        let window = super::f32_le_bytes(
+            values.get(chunk.start * mels..(chunk.start + chunk.length) * mels)?,
+        );
         let logits = accelerator.infer(window)?;
-        if logits.beat.len() < chunk.length || logits.downbeat.len() < chunk.length {
+        crate::pace::tick();
+        let beats = super::f32_from_le_bytes(&logits.beat)?;
+        let downbeats = super::f32_from_le_bytes(&logits.downbeat)?;
+        if beats.len() < chunk.length || downbeats.len() < chunk.length {
             return None;
         }
         for index in chunk.keep_from..chunk.keep_to {
@@ -259,8 +279,8 @@ fn infer_accelerated(
             if target >= frames {
                 break;
             }
-            let beat = logits.beat[index];
-            let downbeat = logits.downbeat[index];
+            let beat = beats[index];
+            let downbeat = downbeats[index];
             if !beat.is_finite() || !downbeat.is_finite() {
                 return None;
             }
@@ -581,6 +601,24 @@ mod tests {
     use crate::analyzer::BeatLogits;
 
     #[test]
+    fn accelerated_head_window_fills_a_whole_chunk_at_any_source_rate() {
+        for rate in [22_050.0, 44_100.0, 48_000.0] {
+            let frames_for = |seconds: f64| {
+                let pcm: Vec<f32> = (0..(seconds * rate).round() as usize)
+                    .map(|i| (i as f32 * 0.01).sin() * 0.3)
+                    .collect();
+                let mono = resample(&pcm, rate, BEAT_SPECTROGRAM_SAMPLE_RATE);
+                compute_beat_spectrogram(&mono, BEAT_SPECTROGRAM_SAMPLE_RATE).frames
+            };
+            let accelerated = frames_for(ACCELERATED_WINDOW_SECONDS);
+            assert!(!accelerator_chunk_plan(accelerated).is_empty(), "{rate}: {accelerated} frames");
+            assert!(accelerated < CHUNK_FRAMES + 2 * BORDER_FRAMES, "{rate}: {accelerated} frames");
+            // The reason for the constant: the rten window never reached it.
+            assert!(frames_for(WINDOW_SECONDS) < CHUNK_FRAMES);
+        }
+    }
+
+    #[test]
     fn sparse_model_downbeats_are_filled_from_measured_beats() {
         // 120 BPM, a beat every 0.5 s for 40 bars; the model found only two
         // bars (0 s and 16 s). The chain should fill every 2 s bar.
@@ -706,15 +744,15 @@ mod tests {
     }
 
     impl BeatAccelerator for FakeAccelerator {
-        fn infer(&self, mel: Vec<f32>) -> Option<BeatLogits> {
+        fn infer(&self, mel: Vec<u8>) -> Option<BeatLogits> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(mel.len(), CHUNK_FRAMES * BEAT_SPECTROGRAM_MELS);
+            assert_eq!(mel.len(), CHUNK_FRAMES * BEAT_SPECTROGRAM_MELS * 4);
             if self.fail_at == Some(call) {
                 return None;
             }
             Some(BeatLogits {
-                beat: vec![1.0; CHUNK_FRAMES],
-                downbeat: vec![0.5; CHUNK_FRAMES],
+                beat: crate::analyzer::f32_le_bytes(&vec![1.0; CHUNK_FRAMES]),
+                downbeat: crate::analyzer::f32_le_bytes(&vec![0.5; CHUNK_FRAMES]),
             })
         }
     }

@@ -6,7 +6,7 @@ import Foundation
 enum RecordingIdentityVerifier {
     private actor Worker {
         private var acceptedFiles: Set<String> = []
-        func matches(videoID: String, reference: String, candidate: String, allowTimingEdits: Bool) -> Bool {
+        func matches(videoID: String, reference: String, candidate: String, allowTimingEdits: Bool, urgent: Bool) async -> Bool {
             func stamp(_ path: String) -> String {
                 let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
                 let bytes = (attributes[.size] as? NSNumber)?.int64Value ?? -1
@@ -16,8 +16,13 @@ enum RecordingIdentityVerifier {
             let key = stamp(reference) + "|" + stamp(candidate) + "|\(allowTimingEdits)"
             guard !Task.isCancelled else { return false }
             if acceptedFiles.contains(key) { return true }
-            guard !Task.isCancelled,
-                  let result = alignVersions(songPath: reference, otherPath: candidate) else {
+            // A check playback is waiting on does not queue behind the planner;
+            // the rest take their turn with the other heavy analyses.
+            let align: @Sendable () -> VersionAlignmentRec? = {
+                Task.isCancelled ? nil : alignVersions(songPath: reference, otherPath: candidate)
+            }
+            let aligned = urgent ? align() : await AnalysisTurns.take { align() }
+            guard !Task.isCancelled, let result = aligned else {
                 PlaybackDebugLog.shared.record("recording identity rejected: no reliable audio alignment", about: videoID)
                 return false
             }
@@ -34,7 +39,9 @@ enum RecordingIdentityVerifier {
     }
     private static let worker = Worker()
 
-    @MainActor static func matches(videoId: String, candidate: String, allowTimingEdits: Bool = false) async -> Bool {
+    /// `urgent`: playback is waiting on the answer, so it skips the analysis
+    /// turns rather than waiting out a transition plan.
+    @MainActor static func matches(videoId: String, candidate: String, allowTimingEdits: Bool = false, urgent: Bool = false) async -> Bool {
         PlaybackController.retainVerificationStream(videoId)
         defer { PlaybackController.releaseVerificationStream(videoId) }
         do {
@@ -49,7 +56,8 @@ enum RecordingIdentityVerifier {
             }
             guard try await settled(reference), try await settled(candidate) else { return false }
             if reference == candidate { return true }
-            let matched = await worker.matches(videoID: videoId, reference: reference, candidate: candidate, allowTimingEdits: allowTimingEdits)
+            let matched = await worker.matches(videoID: videoId, reference: reference, candidate: candidate,
+                                               allowTimingEdits: allowTimingEdits, urgent: urgent)
             return matched && !Task.isCancelled
         } catch { return false }
     }

@@ -453,6 +453,8 @@ impl SymphoniaDecoder {
         let mut interleaved: Vec<f32> = Vec::new();
         let mut skipped = 0u32;
         while out.len() < max_frames * 2 {
+            // A rest point for paced analysis; the render thread is never armed.
+            crate::pace::tick();
             if self.valid_frames.is_some_and(|f| self.decoded_frames >= f) {
                 break;
             }

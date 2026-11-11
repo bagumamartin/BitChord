@@ -592,7 +592,14 @@ private enum TranscriberAlignment {
             if Task.isCancelled { break }
             let length = min(chunkSeconds, durationSeconds - position)
             let start = position
-            let region = await Task.detached(priority: .utility) { decode(start, length) }.value
+            // Each slice takes a turn with the app's other heavy analyses. Fed
+            // back to back the whole song decoded at a full core beside the
+            // transition planner, which is a core of its own; slices are a few
+            // tens of milliseconds each, so they fit between those jobs and the
+            // transcriber, out of process, is never starved for long.
+            let region = await AnalysisTurns.take {
+                await Task.detached(priority: .utility) { decode(start, length) }.value
+            }
             guard let region, region.sampleRate > 0, !region.samples.isEmpty else {
                 // A progressive file may not have this stretch yet.
                 misses += 1

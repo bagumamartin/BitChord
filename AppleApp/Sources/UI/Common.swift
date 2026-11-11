@@ -538,39 +538,171 @@ struct EmptyStateView: View {
 /// Three bars that move while a track plays: the indicator Music puts beside the
 /// row that is playing, so a list says which row it is rather than only colouring
 /// its title. Static under Reduce Motion.
+///
+/// The motion is Core Animation's, not SwiftUI's. A SwiftUI repeating animation
+/// is evaluated in the app every frame, and every frame it also rebuilds the
+/// display list of the scroll view the row sits in: two of these on Home kept
+/// the main thread at about a third of a core for as long as a song played —
+/// first a frame-height animation (a relayout per frame), then a scale (a
+/// display-list rebuild per frame). Layer animations are run by the render
+/// server, so the app does no per-frame work at all.
 struct PlayingBars: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var color: Color = .accentColor
-    @State private var phase = false
-
-    private static let shapes: [[CGFloat]] = [[4, 10, 7], [10, 5, 9], [7, 9, 4]]
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<3, id: \.self) { index in
-                // Scaled, not resized: an animated frame height is a layout
-                // change, and a layout change re-lays out the whole window it
-                // sits in, every frame, for as long as the song plays — about
-                // a third of a core with the playing row on Home. A scale is
-                // drawn, never laid out.
-                Capsule()
-                    .fill(color)
-                    .frame(width: 2.5, height: 11)
-                    .scaleEffect(x: 1, y: height(index) / 11, anchor: .bottom)
-                    .animation(
-                        reduceMotion ? nil : .easeInOut(duration: 0.5).repeatForever(autoreverses: true),
-                        value: phase
-                    )
-            }
+        PlayingBarsLayers(color: color, animated: !reduceMotion)
+            .frame(width: 14, height: 11)
+            .accessibilityElement()
+            .accessibilityLabel("Playing")
+    }
+}
+
+#if os(iOS)
+private typealias PlayingBarsRepresentable = UIViewRepresentable
+#else
+private typealias PlayingBarsRepresentable = NSViewRepresentable
+#endif
+
+private struct PlayingBarsLayers: PlayingBarsRepresentable {
+    let color: Color
+    let animated: Bool
+
+    #if os(iOS)
+    func makeUIView(context: Context) -> PlayingBarsView { PlayingBarsView() }
+    func updateUIView(_ view: PlayingBarsView, context: Context) { update(view, context.environment) }
+    #else
+    func makeNSView(context: Context) -> PlayingBarsView { PlayingBarsView() }
+    func updateNSView(_ view: PlayingBarsView, context: Context) { update(view, context.environment) }
+    #endif
+
+    private func update(_ view: PlayingBarsView, _ environment: EnvironmentValues) {
+        view.configure(color: color.resolve(in: environment).cgColor, animated: animated)
+    }
+}
+
+#if os(iOS)
+private typealias PlayingBarsBase = UIView
+#else
+private typealias PlayingBarsBase = NSView
+#endif
+
+private final class PlayingBarsView: PlayingBarsBase {
+    /// Bar heights in points, at rest and at the far end of each swing.
+    private static let rest: [CGFloat] = [4, 10, 7]
+    private static let swing: [CGFloat] = [10, 5, 9]
+    private static let height: CGFloat = 11
+    private static let width: CGFloat = 2.5
+    private static let spacing: CGFloat = 2
+    private static let animationKey = "playing"
+
+    private let bars = (0..<3).map { _ in CALayer() }
+    private var animated = false
+    #if os(iOS)
+    private var foregroundObserver: NSObjectProtocol?
+    #endif
+
+    init() {
+        super.init(frame: .zero)
+        #if os(iOS)
+        isUserInteractionEnabled = false
+        let host = layer
+        // iOS strips layer animations when the app is backgrounded.
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyAnimations() }
         }
-        .frame(width: 14, height: 11, alignment: .bottom)
-        .onAppear { phase = true }
-        .accessibilityLabel("Playing")
+        #else
+        wantsLayer = true
+        let host = layer!
+        #endif
+        for bar in bars {
+            bar.cornerRadius = Self.width / 2
+            // Bottom edge. The AppKit view is flipped, which flips its backing
+            // layer too, so both platforms measure y downwards.
+            bar.anchorPoint = CGPoint(x: 0.5, y: 1)
+            host.addSublayer(bar)
+        }
     }
 
-    private func height(_ index: Int) -> CGFloat {
-        guard !reduceMotion else { return Self.shapes[0][index] }
-        return Self.shapes[phase ? 1 : 0][index]
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        #if os(iOS)
+        if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+        #endif
+    }
+
+    func configure(color: CGColor, animated: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for bar in bars { bar.backgroundColor = color }
+        CATransaction.commit()
+        guard animated != self.animated else { return }
+        self.animated = animated
+        applyAnimations()
+    }
+
+    #if os(iOS)
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        placeBars()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        applyAnimations()
+    }
+    #else
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        placeBars()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyAnimations()
+    }
+    #endif
+
+    private func placeBars() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let total = 3 * Self.width + 2 * Self.spacing
+        let left = (bounds.width - total) / 2
+        let baseline = bounds.height
+        for (index, bar) in bars.enumerated() {
+            bar.bounds = CGRect(x: 0, y: 0, width: Self.width, height: Self.height)
+            bar.position = CGPoint(x: left + CGFloat(index) * (Self.width + Self.spacing) + Self.width / 2, y: baseline)
+        }
+        CATransaction.commit()
+    }
+
+    /// Re-applied whenever the view lands in a window: a layer's animations do
+    /// not survive leaving one.
+    private func applyAnimations() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, bar) in bars.enumerated() {
+            let rest = Self.rest[index] / Self.height
+            bar.transform = CATransform3DMakeScale(1, rest, 1)
+            bar.removeAnimation(forKey: Self.animationKey)
+            guard animated, window != nil else { continue }
+            let swing = CABasicAnimation(keyPath: "transform.scale.y")
+            swing.fromValue = rest
+            swing.toValue = Self.swing[index] / Self.height
+            swing.duration = 0.5
+            swing.autoreverses = true
+            swing.repeatCount = .infinity
+            swing.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            swing.isRemovedOnCompletion = false
+            bar.add(swing, forKey: Self.animationKey)
+        }
+        CATransaction.commit()
     }
 }
 

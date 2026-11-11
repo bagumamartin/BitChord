@@ -469,8 +469,9 @@ extension PlaybackController {
                             )
                         }
                     }
-                    // Music Understanding (OS 27+): seed rhythm/key/structure
-                    // overlays once per pair before the first plan. Sequential
+                    // Music Understanding (OS 27+): seed key (and, without the
+                    // Neural Engine beat model, rhythm) overlays once per pair
+                    // before the first plan. Sequential
                     // so we never run two Metal sessions at once (background
                     // GPU asserts abort the process).
                     //
@@ -478,7 +479,7 @@ extension PlaybackController {
                     // analysed once it is complete, which is usually a replan or
                     // two later, and the incoming track is the one whose grid
                     // matters most. Each file is tried once it is complete; a
-                    // seeded rhythm grid also lets the native planner skip the
+                    // seeded rhythm grid lets the native planner skip the CPU
                     // Beat This! pass for that file.
                     if MusicUnderstandingAnalyzer.isAvailable, !(muOutgoingDone && muIncomingDone) {
                         let decoder: (Double, [String: String]) -> MusicUnderstandingAnalyzer.Decode = { length, headers in
@@ -491,18 +492,27 @@ extension PlaybackController {
                         }
                         var outOk = false
                         var inOk = false
+                        // Each file in its own analysis turn, so a video map or
+                        // the other plan never runs beside it.
                         if !muOutgoingDone {
-                            outOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
-                                filePath: currentSource, allowAccelerator: allowMusicUnderstanding,
-                                decode: decoder(outgoingDuration, currentSourceHeaders)
-                            )
+                            let decode = decoder(outgoingDuration, currentSourceHeaders)
+                            outOk = await AnalysisTurns.take {
+                                await MusicUnderstandingAnalyzer.analyzeAndSeed(
+                                    filePath: currentSource, allowAccelerator: allowMusicUnderstanding,
+                                    decode: decode
+                                )
+                            }
                             muOutgoingDone = outOk || Self.fileSettled(currentSource)
                         }
                         if !muIncomingDone {
-                            inOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
-                                filePath: resolved.source, allowAccelerator: allowMusicUnderstanding,
-                                decode: decoder(incomingDuration, resolved.headers)
-                            )
+                            let decode = decoder(incomingDuration, resolved.headers)
+                            let incomingSource = resolved.source
+                            inOk = await AnalysisTurns.take {
+                                await MusicUnderstandingAnalyzer.analyzeAndSeed(
+                                    filePath: incomingSource, allowAccelerator: allowMusicUnderstanding,
+                                    decode: decode
+                                )
+                            }
                             muIncomingDone = inOk || Self.fileSettled(resolved.source)
                         }
                         if outOk || inOk {
@@ -513,19 +523,24 @@ extension PlaybackController {
                             )
                         }
                     }
-                    let rawPlan = engine.planAutomix(
-                        outgoingPath: currentSource,
-                        incomingPath: resolved.source,
-                        outgoingText: currentText,
-                        incomingText: nextText,
-                        albumSequential: albumSequential,
-                        crossfadeSeconds: fade,
-                        outgoingDurationSeconds: outgoingDuration,
-                        incomingDurationSeconds: incomingDuration,
-                        outgoingHeaders: currentSourceHeaders,
-                        incomingHeaders: resolved.headers,
-                        allowEffects: self.pacing.allowsEffect(for: transitionPair)
-                    )
+                    let allowEffects = self.pacing.allowsEffect(for: transitionPair)
+                    let incomingSource = resolved.source
+                    let incomingHeaders = resolved.headers
+                    let rawPlan = await AnalysisTurns.take {
+                        engine.planAutomix(
+                            outgoingPath: currentSource,
+                            incomingPath: incomingSource,
+                            outgoingText: currentText,
+                            incomingText: nextText,
+                            albumSequential: albumSequential,
+                            crossfadeSeconds: fade,
+                            outgoingDurationSeconds: outgoingDuration,
+                            incomingDurationSeconds: incomingDuration,
+                            outgoingHeaders: currentSourceHeaders,
+                            incomingHeaders: incomingHeaders,
+                            allowEffects: allowEffects
+                        )
+                    }
                     // Each plan decodes both tracks whole; hand those pages back now
                     // rather than when the whole preparation ends minutes later.
                     MemoryRelief.soon()

@@ -25,6 +25,7 @@ mod callback;
 mod engine;
 mod loudness;
 mod output;
+mod pace;
 mod records;
 mod render;
 

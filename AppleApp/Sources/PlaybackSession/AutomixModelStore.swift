@@ -94,10 +94,13 @@ final class AutomixModelStore {
             fileName: "beat_this_final0_coreml.aar",
             displayName: "Accelerated beat detection",
             detail: "Runs the same Beat This! model on the Neural Engine, several times faster than the CPU path. Requires the beat model.",
-            byteCount: 18_818_981,
-            sha256: "4f545c60ac59282bd8601104a94ff4123f5304d4e5e233311f6ec67243975fff",
+            // v2: the same weights with attention computed in 150-row query
+            // blocks, so the Neural Engine holds about 90 MB of working buffers
+            // instead of about 460 MB. Same beats on every parity track.
+            byteCount: 18_826_124,
+            sha256: "cd00f20bd602f4d1532f0b683fe418f278affead3494f954032039d902b5b88f",
             // The owner's release asset; the tag is the pin, not a branch.
-            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-coreml-v1/beat_this_final0_coreml.aar")!
+            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-coreml-v2/beat_this_final0_coreml.aar")!
         )
 
         /// The compiled bundle this archive yields. Kept next to the archive so

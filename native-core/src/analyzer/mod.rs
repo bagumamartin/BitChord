@@ -32,11 +32,39 @@ pub use sequencer::{rank_candidate_indices, rank_candidates, CandidateScore};
 pub use smoothness::{score_plan, SmoothnessReport};
 
 /// Beat and downbeat logits for one 1500-frame window, in the order the beat
-/// tracker consumes them.
+/// tracker consumes them, each as little-endian `f32` bytes.
+///
+/// Bytes rather than `Vec<f32>` for the same reason as the mel window going
+/// the other way: UniFFI moves a float sequence one element at a time through
+/// generic Swift readers and writers, about 3 µs a value. The 192 000-value
+/// window cost ~70 ms of CPU per chunk that way — some 0.6 s a track, three
+/// hundred times the Neural Engine prediction it fed. Bytes cross as one copy.
 #[derive(uniffi::Record, Debug, Clone)]
 pub struct BeatLogits {
-    pub beat: Vec<f32>,
-    pub downbeat: Vec<f32>,
+    pub beat: Vec<u8>,
+    pub downbeat: Vec<u8>,
+}
+
+/// `values` as little-endian `f32` bytes, the accelerator bridge's layout.
+pub(crate) fn f32_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// The inverse of [`f32_le_bytes`]; `None` for a length that is not whole floats.
+pub(crate) fn f32_from_le_bytes(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect(),
+    )
 }
 
 /// A host-side accelerated beat backend.
@@ -47,7 +75,9 @@ pub struct BeatLogits {
 /// rten, so one analysis never mixes backends.
 #[uniffi::export(callback_interface)]
 pub trait BeatAccelerator: Send + Sync {
-    fn infer(&self, mel: Vec<f32>) -> Option<BeatLogits>;
+    /// `mel` is the window's `1500 × 128` values as little-endian `f32` bytes,
+    /// frame-major, exactly as rten reads them.
+    fn infer(&self, mel: Vec<u8>) -> Option<BeatLogits>;
 }
 
 /// Refresh both graphs and discard analyses made with the previous model set.
@@ -182,9 +212,9 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 }
 
 /// The generic loop's arithmetic with the weights computed once per phase.
-/// Same kernel, same taps, same f64 accumulation in the same order; only the
-/// output's position is taken from an exact integer phase rather than from
-/// `index / ratio` in floating point, which differs from it in the last bit.
+/// Same kernel and taps. Two things differ from it in the last bits only: the
+/// accumulation runs in lanes ([`dot`]), and the output's position comes from
+/// an exact integer phase rather than from `index / ratio` in floating point.
 fn resample_phased(
     input: &[f32],
     output: &mut [f32],
@@ -225,15 +255,15 @@ fn resample_phased(
         .collect();
 
     for (index, out) in output.iter_mut().enumerate() {
+        if index & 0x3fff == 0 {
+            crate::pace::tick();
+        }
         let phase = &table[index % phases];
         let first = phase.first_tap + (index / phases) as i64 * advance;
         let end = first + phase.weights.len() as i64 - 1;
         let mut sum = 0.0;
         if first >= 0 && end <= last {
-            let window = &input[first as usize..=end as usize];
-            for (weight, sample) in phase.weights.iter().zip(window) {
-                sum += weight * *sample as f64;
-            }
+            sum = dot(&phase.weights, &input[first as usize..=end as usize]);
         } else {
             for (offset, weight) in phase.weights.iter().enumerate() {
                 let clamped = (first + offset as i64).clamp(0, last) as usize;
@@ -246,6 +276,32 @@ fn resample_phased(
             0.0
         };
     }
+}
+
+/// `Σ weight × sample` in eight independent f64 lanes.
+///
+/// One running sum makes every tap wait for the previous add, and with ~140
+/// taps per output sample that chain was the resampler's whole cost: about
+/// 350 ms for a three-minute track, twice per track (the beat model's rate and
+/// the DSP pass's). Eight sums run side by side and vectorise. The result
+/// differs from the single sum only in f64 rounding, far below the f32 the
+/// sample is stored as.
+#[inline]
+fn dot(weights: &[f64], samples: &[f32]) -> f64 {
+    const LANES: usize = 8;
+    let mut lanes = [0f64; LANES];
+    let mut weight_chunks = weights.chunks_exact(LANES);
+    let mut sample_chunks = samples.chunks_exact(LANES);
+    for (w, x) in (&mut weight_chunks).zip(&mut sample_chunks) {
+        for lane in 0..LANES {
+            lanes[lane] += w[lane] * x[lane] as f64;
+        }
+    }
+    let mut tail = 0f64;
+    for (w, x) in weight_chunks.remainder().iter().zip(sample_chunks.remainder()) {
+        tail += w * *x as f64;
+    }
+    ((lanes[0] + lanes[4]) + (lanes[1] + lanes[5])) + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7])) + tail
 }
 
 fn sinc(x: f64) -> f64 {
@@ -352,6 +408,8 @@ fn mel_filterbank(sample_rate: f64) -> Vec<MelFilter> {
 
 /// Unnormalized in-place radix-2 FFT (size must be a power of two).
 pub(crate) fn fft(values: &mut [Complex]) {
+    // Every spectrogram the planner computes passes here, frame by frame.
+    crate::pace::tick();
     let size = values.len();
     let mut swapped = 0usize;
     for index in 1..size {
