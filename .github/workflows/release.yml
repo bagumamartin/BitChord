@@ -53,7 +53,8 @@ jobs:
   release:
     needs: check
     if: needs.check.outputs.skip != 'true'
-    runs-on: macos-26
+    # Xcode 27 (public preview image); the app links the macOS/iOS 27 SDK.
+    runs-on: xcode-27
     timeout-minutes: 120
     env:
       VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
@@ -85,7 +86,7 @@ jobs:
 
       - name: Select Xcode 27
         run: |
-          xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)"
+          xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)"
           [[ -n "$xcode" ]] || { echo "::error::This runner image has no Xcode 27"; ls -d /Applications/Xcode*.app; exit 1; }
           sudo xcode-select -s "$xcode/Contents/Developer"
           xcodebuild -version
