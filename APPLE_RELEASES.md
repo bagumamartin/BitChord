@@ -1,6 +1,6 @@
 # One Apple release
 
-The installed version is always the marketing version **and build number**. `AppleApp/project.yml` is the shared source for both platforms. The next candidate is 1.0.6 (build 15); this does not mean it has been published.
+The installed version is always the marketing version **and build number**. `AppleApp/project.yml` is the shared source for both platforms. The next candidate is 1.0.7 (build 16); this does not mean it has been published.
 
 Both files belong to one immutable GitHub release. Use the same source revision, version and build for iOS and Mac. Build from a clean commit and pass `BITCHORD_BUILD_REVISION=$(git rev-parse --short=12 HEAD)` to Xcode; the iOS packaging script stamps this automatically and marks an uncommitted tree `-dirty`.
 
