@@ -231,17 +231,17 @@ private struct RecentsSkeletonBlock: View {
                         endPoint: .trailing
                     )
                     .frame(width: geometry.size.width * 0.55)
-                    .offset(x: sweep ? geometry.size.width : -geometry.size.width * 0.55)
+                    // Scoped to the sweep's own offset, so a block resized by
+                    // its layout snaps rather than bouncing with the shimmer.
+                    .animation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+                        $0.offset(x: sweep ? geometry.size.width : -geometry.size.width * 0.55)
+                    }
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
         .frame(height: height)
         .onAppear { sweep = true }
-        .animation(
-            reduceMotion ? nil : .linear(duration: 1.4).repeatForever(autoreverses: false),
-            value: sweep
-        )
         .accessibilityHidden(true)
     }
 }

@@ -376,11 +376,12 @@ struct SkeletonBlock: View {
             .frame(height: height)
             // A skeleton that still pulses is still motion. With Reduce Motion on
             // it is a static placeholder, which is what the setting is asking for.
-            .opacity(reduceMotion ? 0.75 : (phase ? 0.5 : 0.9))
+            // The pulse is scoped to opacity alone: a value-scoped repeating
+            // animation also caught any size change, so a block resized by
+            // its layout bounced in and out forever.
             .animation(
-                reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-                value: phase
-            )
+                reduceMotion ? nil : .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+            ) { $0.opacity(reduceMotion ? 0.75 : (phase ? 0.5 : 0.9)) }
             .onAppear { phase = true }
             .accessibilityHidden(true)
     }
