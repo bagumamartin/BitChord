@@ -27,9 +27,9 @@ struct LyricsPane: View {
     var hasTrack: Bool
     var sourceLabel: String? = nil
     var alignmentInProgress: Bool = false
-    /// The word timings were added by this app's on-device alignment, not
-    /// supplied by the provider — the attribution says so.
-    var alignedLocally: Bool = false
+    /// How much of the lyric this app's on-device alignment timed. The
+    /// attribution claims only what was actually timed.
+    var alignedLocally: LyricsAudioAligner.Coverage? = nil
     /// Opens the per-track provider picker — shown with the no-lyrics state,
     /// where it is most needed and previously unreachable.
     var onChooseSource: (() -> Void)? = nil
@@ -568,8 +568,14 @@ struct LyricsPane: View {
 
     private var attribution: String? {
         guard let sourceLabel, !sourceLabel.isEmpty else { return nil }
-        if alignmentInProgress { return "Lyrics by \(sourceLabel) · aligning locally…" }
-        if alignedLocally { return "Lyrics by \(sourceLabel) · Synced by BitChord" }
+        if alignmentInProgress { return "Lyrics by \(sourceLabel) · syncing words…" }
+        // Claim only what the audio actually timed. "Synced by BitChord" used
+        // to appear when a single line matched; a part-timed lyric now says
+        // how much, and a pass that matched nothing claims nothing.
+        if let coverage = alignedLocally, coverage.timed > 0 {
+            if coverage.fraction >= 0.8 { return "Lyrics by \(sourceLabel) · Synced by BitChord" }
+            return "Lyrics by \(sourceLabel) · BitChord synced \(coverage.timed) of \(coverage.total) lines"
+        }
         let document = cache.document(for: lines)
         guard document.synced else { return "Lyrics by \(sourceLabel) · unsynced" }
         return document.fullyTimed

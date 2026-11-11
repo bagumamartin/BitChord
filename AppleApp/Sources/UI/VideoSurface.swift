@@ -91,6 +91,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         guard gate.enabled != on else { return }
         PlaybackDebugLog.shared.record("video: switch \(on ? "on" : "off")", about: gate.trackId)
         gate.setEnabled(on)
+        if on { UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastUsedKey) }
         // Off puts the song back if the music-video upload had taken its place.
         if !on {
             hooks?.playSongVersion()
@@ -215,6 +216,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         }
         guard networkAllowed, gate.canRequest, let id = gate.trackId else {
             stop()
+            warmWhileOff()
             return
         }
         if mountedId == id, resolvedId == id { return }
@@ -234,7 +236,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         controller.detach()
 
         if !forceRefresh, let prepared = preparedAhead, prepared.songId == id,
-           Date().timeIntervalSince(prepared.saved) < 120 {
+           Date().timeIntervalSince(prepared.saved) < Self.preparedLifetime {
             preparedAhead = nil
             preparing = false
             resolvedId = id
@@ -367,10 +369,52 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
     /// up (the map is kept on disk), so a change of track shows its picture
     /// as soon as it loads instead of after the search and the alignment.
     private func prepareAhead() {
-        guard gate.canRequest, let next = hooks?.next(), next.videoId != aheadId else { return }
+        guard gate.canRequest, let next = hooks?.next() else { return }
+        // Not on the track change itself: its alignment would land on the blend.
+        prepare(next, delay: 20)
+    }
+
+    /// A signed video URL lives for hours; a stale one is refreshed by the
+    /// player-failure retry, so a prepared choice can be kept for a while.
+    private static let preparedLifetime: TimeInterval = 20 * 60
+    private static let lastUsedKey = "VideoSwitchLastUsedAt"
+
+    /// Listeners who use the picture get the playing song's video found and
+    /// lined up while the switch is off, so turning it on shows the picture
+    /// from the prepared path (~0.3 s) instead of a cold search and alignment
+    /// (~7 s). Nothing is decoded or rendered; it waits until the track is
+    /// under way so it never lands on a transition. Listeners who have not
+    /// used the switch in two weeks pay nothing.
+    private func warmWhileOff() {
+        guard !gate.canRequest, networkAllowed, gate.active,
+              let id = gate.trackId, !id.isEmpty,
+              preparedAhead?.songId != id else { return }
+        let lastUsed = UserDefaults.standard.double(forKey: Self.lastUsedKey)
+        guard lastUsed > 0, Date().timeIntervalSince1970 - lastUsed < 14 * 24 * 3600 else { return }
+        // Credits are read after the delay: at the track change they can
+        // still describe the previous song.
+        prepare((videoId: id, title: "", artist: "", seconds: 0, durationText: nil), delay: 15)
+    }
+
+    private func prepare(
+        _ next: (videoId: String, title: String, artist: String, seconds: Double, durationText: String?),
+        delay: Double
+    ) {
+        guard next.videoId != aheadId else { return }
         aheadId = next.videoId
         aheadTask?.cancel()
         aheadTask = Task(priority: .utility) { [weak self] in
+            var next = next
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                if next.title.isEmpty {
+                    guard let self, self.gate.trackId == next.videoId,
+                          let track = self.hooks?.track() else { return }
+                    next = (videoId: next.videoId, title: track.title, artist: track.artist,
+                            seconds: track.seconds, durationText: track.durationText)
+                }
+            }
             let own = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: next.videoId)
             if let own {
                 let qualifies = own.isAuthoritativeMusicVideo
@@ -405,7 +449,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
     }
 
     private func rememberPrepared(songId: String, side: ResolvedVideoSide, map: VideoVersionAlignment.Map?) async {
-        guard !Task.isCancelled, gate.canRequest, networkAllowed, aheadId == songId else { return }
+        guard !Task.isCancelled, networkAllowed, aheadId == songId else { return }
         preparedAhead = PreparedVideo(songId: songId, side: side, map: map, saved: Date())
         // Only metadata is warmed. AVFoundation remains the sole video decoder,
         // and no GPU work is started for an offscreen upcoming item.
@@ -415,10 +459,14 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
     }
 
     private func stop() {
-        aheadTask?.cancel()
-        aheadTask = nil
-        aheadId = nil
-        preparedAhead = nil
+        // A preparation for the playing song survives the switch being off:
+        // that is the whole point of warming it.
+        if aheadId != gate.trackId || gate.trackId == nil {
+            aheadTask?.cancel()
+            aheadTask = nil
+            aheadId = nil
+        }
+        if preparedAhead?.songId != gate.trackId { preparedAhead = nil }
         resolveTask?.cancel()
         resolveTask = nil
         mountedId = nil

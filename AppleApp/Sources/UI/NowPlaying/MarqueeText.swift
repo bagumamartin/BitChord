@@ -43,7 +43,10 @@ struct Marquee<Content: View>: View {
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boxWidth = $0 }
             .overlay(alignment: .leading) {
-                TimelineView(.animation(paused: !crawls)) { context in
+                TimelineView(MarqueeSchedule(
+                    anchor: anchor, startDelay: startDelay, pass: passDuration,
+                    rest: Self.rest, paused: !crawls
+                )) { context in
                     let moved = crawls ? offset(at: context.date) : 0
                     HStack(spacing: Self.gap) {
                         content.fixedSize()
@@ -86,6 +89,49 @@ struct Marquee<Content: View>: View {
             }
         } else {
             Rectangle()
+        }
+    }
+}
+
+/// Frames for a marquee: sixty a second while the line moves, none while it
+/// waits out its start delay or rests. `.animation` ticked at the display's
+/// full rate for as long as a title overflowed, rests included, which redrew
+/// the player a hundred and twenty times a second for a line standing still.
+private struct MarqueeSchedule: TimelineSchedule {
+    var anchor: Date
+    var startDelay: Double
+    var pass: Double
+    var rest: Double
+    var paused: Bool
+    private static let frame = 1.0 / 60.0
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
+        if paused {
+            var sent = false
+            return AnyIterator {
+                defer { sent = true }
+                return sent ? nil : startDate
+            }
+        }
+        let origin = anchor.addingTimeInterval(startDelay)
+        let cycle = pass + rest
+        var next: Date? = startDate
+        return AnyIterator {
+            guard let current = next else { return nil }
+            let elapsed = current.timeIntervalSince(origin)
+            if elapsed < 0 {
+                next = origin
+            } else {
+                let within = elapsed.truncatingRemainder(dividingBy: cycle)
+                if within < pass {
+                    // The last frame of a pass lands on its end, so the line
+                    // is drawn at rest rather than one step short of it.
+                    next = current.addingTimeInterval(min(Self.frame, pass - within + 0.0005))
+                } else {
+                    next = current.addingTimeInterval(cycle - within)
+                }
+            }
+            return current
         }
     }
 }

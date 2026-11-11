@@ -196,6 +196,34 @@ extension PlaybackController {
         return true
     }
 
+    private nonisolated static func fileBytes(_ path: String) -> Int64 {
+        let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber
+        return size?.int64Value ?? 0
+    }
+
+    /// A quarter more audio (or 512 KB, whichever is larger) is enough new
+    /// evidence to be worth another whole-track analysis.
+    private nonisolated static func grewMeaningfully(from old: Int64, to new: Int64) -> Bool {
+        new - old >= max(old / 4, 512 * 1024)
+    }
+
+    /// Holds next-track preparation until this track is ~15 s in, at most 20 s,
+    /// and never when the track is too short to spare the time.
+    private nonisolated static func waitForOpeningToSettle(
+        engine: PlayerEngine,
+        outgoingDuration: Double,
+        transitionSeconds: Double
+    ) async throws {
+        let settledAt = 15.0
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            let position = engine.positionSeconds()
+            if position >= settledAt { return }
+            if outgoingDuration > 0, outgoingDuration - position < transitionSeconds + 60 { return }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
     /// Keeps the engine's pending-next pointing at the following queue entry
     /// so gapless/crossfade arming works (spec §3.1). Repeat-one without Automix
     /// arms a gapless loop of the current file.
@@ -293,7 +321,17 @@ extension PlaybackController {
             remainingSeconds: outgoingDuration - position, transitionSeconds: fadeSeconds
         )
         nextPreparationTask = Task.detached(priority: .userInitiated) {
+            defer { MemoryRelief.soon() }
             do {
+                // A handoff used to start the next track's resolve, download
+                // and whole-track analysis while the blend into this track was
+                // still ramping — the moment the mixer, lyric fetch, video and
+                // artwork all compete too. Let the opening settle first; a
+                // short track or a late queue change skips the wait.
+                try await Self.waitForOpeningToSettle(
+                    engine: engine, outgoingDuration: outgoingDuration,
+                    transitionSeconds: fadeSeconds
+                )
                 let selection: ResolveOutcome
                 if let repeatedSource {
                     selection = ResolveOutcome(source: repeatedSource, leftover: nil)
@@ -388,6 +426,8 @@ extension PlaybackController {
                 // Analyze it now against the queued safety overlap, then refresh
                 // the plan as more of either file arrives while the mixer is arming.
                 var attempt = 0
+                var muOutgoingDone = false
+                var muIncomingDone = false
                 while true {
                     try Task.checkCancellation()
                     let stillPlanning = await MainActor.run { [weak self] in
@@ -398,6 +438,19 @@ extension PlaybackController {
                             && self.queueNextRevision == revision
                     }
                     guard stillPlanning else { return }
+                    // An analysis of a file still downloading is thrown away:
+                    // the cache is keyed on the file's size, so the finished
+                    // file is analysed again from the top (decode, beat and
+                    // vocal models), which was a second full burst of CPU for
+                    // every track. The safety overlap is already queued, so
+                    // while the song has a minute or more to run, wait for the
+                    // finished files; only a transition that is close plans
+                    // from what has arrived.
+                    while !(Self.fileSettled(currentSource) && Self.fileSettled(resolved.source)) {
+                        let remaining = outgoingDuration - engine.positionSeconds()
+                        if outgoingDuration <= 0 || remaining < safetyFade + 60 { break }
+                        try await Task.sleep(nanoseconds: 2_000_000_000)
+                    }
                     // C's instrumentation: a transition is being armed against
                     // an outgoing track whose analysed tail is unknown. One line
                     // per transition says how often that happens and whether the
@@ -420,13 +473,38 @@ extension PlaybackController {
                     // overlays once per pair before the first plan. Sequential
                     // so we never run two Metal sessions at once (background
                     // GPU asserts abort the process).
-                    if attempt == 0, MusicUnderstandingAnalyzer.isAvailable {
-                        let outOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
-                            filePath: currentSource, allowAccelerator: allowMusicUnderstanding
-                        )
-                        let inOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
-                            filePath: resolved.source, allowAccelerator: allowMusicUnderstanding
-                        )
+                    //
+                    // Not only on the first plan: a progressive file can only be
+                    // analysed once it is complete, which is usually a replan or
+                    // two later, and the incoming track is the one whose grid
+                    // matters most. Each file is tried once it is complete; a
+                    // seeded rhythm grid also lets the native planner skip the
+                    // Beat This! pass for that file.
+                    if MusicUnderstandingAnalyzer.isAvailable, !(muOutgoingDone && muIncomingDone) {
+                        let decoder: (Double, [String: String]) -> MusicUnderstandingAnalyzer.Decode = { length, headers in
+                            { path, destination in
+                                engine.writeAnalysisWav(
+                                    source: path, dest: destination.path, headers: headers,
+                                    maxSeconds: length > 0 ? length + 5 : 0, targetRate: nil
+                                )
+                            }
+                        }
+                        var outOk = false
+                        var inOk = false
+                        if !muOutgoingDone {
+                            outOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
+                                filePath: currentSource, allowAccelerator: allowMusicUnderstanding,
+                                decode: decoder(outgoingDuration, currentSourceHeaders)
+                            )
+                            muOutgoingDone = outOk || Self.fileSettled(currentSource)
+                        }
+                        if !muIncomingDone {
+                            inOk = await MusicUnderstandingAnalyzer.analyzeAndSeed(
+                                filePath: resolved.source, allowAccelerator: allowMusicUnderstanding,
+                                decode: decoder(incomingDuration, resolved.headers)
+                            )
+                            muIncomingDone = inOk || Self.fileSettled(resolved.source)
+                        }
                         if outOk || inOk {
                             NSLog(
                                 "[BitChord] Music Understanding overlay out=%@ in=%@",
@@ -448,6 +526,9 @@ extension PlaybackController {
                         incomingHeaders: resolved.headers,
                         allowEffects: self.pacing.allowsEffect(for: transitionPair)
                     )
+                    // Each plan decodes both tracks whole; hand those pages back now
+                    // rather than when the whole preparation ends minutes later.
+                    MemoryRelief.soon()
                     let plan = constrainAutomixPlanForSources(
                         plan: rawPlan, outgoingSource: currentSource, incomingSource: resolved.source,
                         outgoingDuration: outgoingDuration, incomingDuration: incomingDuration
@@ -506,12 +587,21 @@ extension PlaybackController {
                     // unavailable or the safety fade is about to start.
                     let settled = Self.fileSettled(currentSource) && Self.fileSettled(resolved.source)
                     if settled { return }
-                    let position = engine.positionSeconds()
-                    let remaining = outgoingDuration - position
                     let lead = max(plan.fadeSeconds, safetyFade) + 8
-                    if outgoingDuration > 0, remaining < lead { return }
+                    // Each plan re-analyses a grown file from the top (decode,
+                    // beat model, vocals). Replanning every two seconds repeated
+                    // that work many times per transition; replan only once
+                    // either file has grown meaningfully or finished.
+                    let planned = (Self.fileBytes(currentSource), Self.fileBytes(resolved.source))
+                    while true {
+                        let remaining = outgoingDuration - engine.positionSeconds()
+                        if outgoingDuration > 0, remaining < lead { return }
+                        try await Task.sleep(nanoseconds: 2_000_000_000)
+                        if Self.fileSettled(currentSource) && Self.fileSettled(resolved.source) { break }
+                        if Self.grewMeaningfully(from: planned.0, to: Self.fileBytes(currentSource))
+                            || Self.grewMeaningfully(from: planned.1, to: Self.fileBytes(resolved.source)) { break }
+                    }
                     attempt += 1
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             } catch is CancellationError {
                 return

@@ -109,6 +109,14 @@ extension SettingsView {
                 isOn: $syncedLyrics
             )
         }
+        rows.row("Lyrics on Player", "lyrics", "inline", "player", "line", "hide") {
+            SettingsToggleLine(
+                glyph: .lyrics,
+                title: "Lyrics on Player",
+                subtitle: "Shows the line being sung under the song title",
+                isOn: $playerLyricLine
+            )
+        }
         if syncedLyrics {
             rows.row("Blur Unfocused Lyrics", "blur", "lyrics", "focus") {
                 SettingsToggleLine(glyph: .reduceBlur, title: "Blur Unfocused Lyrics",

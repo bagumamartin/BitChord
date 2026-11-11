@@ -37,6 +37,8 @@ pub(super) mod analysis_cache {
     const CAPACITY: usize = 6;
     const DISK_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
     const SCHEMA_VERSION: u32 = 3;
+    /// Seconds two reported lengths of one file may differ by.
+    const DURATION_SLACK: f64 = 2.0;
 
     pub(crate) type Key = (String, u64, u64, u64, String, bool);
 
@@ -232,11 +234,17 @@ pub(super) mod analysis_cache {
         compute: impl FnOnce() -> Analysis,
     ) -> Arc<Analysis> {
         let (size, modified) = file_identity(path);
+        // The same file arrives with two lengths: the catalogue's whole
+        // seconds while it is the incoming track, the decoder's exact figure
+        // once it is playing. Keyed exactly, that was a second full analysis
+        // of every track at its own transition. Whole seconds are the key, and
+        // a neighbour within `DURATION_SLACK` is the same file.
+        let rounded = if duration.is_finite() && duration > 0.0 { duration.round() } else { 0.0 };
         let key: Key = (
             path.to_string(),
             size,
             modified,
-            duration.to_bits(),
+            rounded.to_bits(),
             model_identity,
             skip_vocals,
         );
@@ -248,6 +256,17 @@ pub(super) mod analysis_cache {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(hit) = guard.entries.get(&key) {
                     return hit.clone();
+                }
+                if rounded > 0.0 {
+                    let neighbour = guard.entries.iter().find(|(k, _)| {
+                        k.0 == key.0 && k.1 == key.1 && k.2 == key.2 && k.4 == key.4 && k.5 == key.5 && {
+                            let other = f64::from_bits(k.3);
+                            other > 0.0 && (other - rounded).abs() <= DURATION_SLACK
+                        }
+                    });
+                    if let Some((_, hit)) = neighbour {
+                        return hit.clone();
+                    }
                 }
                 if let Some(flight) = guard.in_flight.get(&key) {
                     (flight.clone(), false)
@@ -722,4 +741,29 @@ pub(super) fn analyze_cached(
     analysis_cache::get_or_compute(path, skip_vocals, duration, || {
         analyze(path, skip_vocals, decode, duration)
     })
+}
+
+#[cfg(test)]
+mod duration_slack_tests {
+    use super::analysis_cache::get_or_compute_for_identity;
+
+    #[test]
+    fn a_track_is_analysed_once_under_its_catalogue_and_decoded_lengths() {
+        let path = format!("/nonexistent/slack-{}.m4a", std::process::id());
+        let mut runs = 0;
+        let _ = get_or_compute_for_identity(&path, true, 213.0, "id".into(), || {
+            runs += 1;
+            Default::default()
+        });
+        let _ = get_or_compute_for_identity(&path, true, 212.37, "id".into(), || {
+            runs += 1;
+            Default::default()
+        });
+        assert_eq!(runs, 1);
+        let _ = get_or_compute_for_identity(&path, true, 180.0, "id".into(), || {
+            runs += 1;
+            Default::default()
+        });
+        assert_eq!(runs, 2);
+    }
 }

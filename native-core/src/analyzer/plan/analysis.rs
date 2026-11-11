@@ -177,7 +177,22 @@ pub(super) fn analyze(
     // Beat This! over the whole decoded buffer when we have it. The head-only
     // window left mix-out anchors on a DSP grid while intros looked great —
     // Apple AutoMix's quality lives at the *end* of the outgoing track.
-    let model_grid = if let Some((mono, rate)) = whole.as_ref() {
+    //
+    // Skipped when an external rhythm grid is already seeded for this file
+    // (Music Understanding, OS 27+): `apply_overlay` below replaces the beats
+    // and bars with that grid anyway, so the Beat This! pass would be computed
+    // only to be thrown away — and on the Neural Engine it is the costliest
+    // thing a transition does, about 430 MB of device buffers held for the
+    // length of the burst. The DSP grid above stays, and is what the overlay's
+    // octave check compares against.
+    let overlay_has_grid = overlays::get(path).is_some_and(|o| {
+        o.beats.as_ref().is_some_and(|b| b.len() >= 2)
+            && o.downbeats.as_ref().is_some_and(|d| !d.is_empty())
+    });
+    let model_grid = if overlay_has_grid {
+        log::info!("automix analysis {path}: beat model skipped — external rhythm grid seeded");
+        None
+    } else if let Some((mono, rate)) = whole.as_ref() {
         beat::track(mono, *rate as f64, 0.0)
     } else if let Some((mono, rate, offset)) = decode(path, 0.0, head_len, true) {
         beat::track(&mono, rate as f64, offset)
@@ -185,6 +200,7 @@ pub(super) fn analyze(
         None
     };
     match model_grid {
+        None if overlay_has_grid => {}
         Some(grid) => {
             let model_bars = grid.downbeats.len();
             let model_bpm = grid.bpm;

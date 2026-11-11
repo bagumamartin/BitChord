@@ -223,4 +223,30 @@ class LyricFocusTest {
         val lines = listOf(line(0, "one", sungUntilMs = 9_000), line(500, "two"))
         assertEquals(LyricFocus.SCROLL_LEAD_MIN_MS, LyricFocus.scrollLead(lines, 1_000))
     }
+
+    @Test
+    fun `a partly timed lyric keeps untimed lines from stealing the highlight`() {
+        // Lines 1 and 3 have been heard; 2, 4 and 5 not yet. Read as zero, line 5
+        // was "the latest line started" at every position.
+        val lines = listOf(
+            line(0),
+            line(10_000),
+            line(0),
+            line(20_000),
+            line(0),
+            line(0),
+        )
+
+        assertEquals(listOf(1), LyricFocus.activeRows(lines, 12_000))
+        assertEquals(listOf(2), LyricFocus.activeRows(lines, 16_000))
+        assertEquals(listOf(3), LyricFocus.activeRows(lines, 21_000))
+        assertEquals(15_000, LyricFocus.startTimes(lines)[2])
+        assertEquals(24_000, LyricFocus.startTimes(lines)[4])
+    }
+
+    @Test
+    fun `a fully timed lyric keeps its own times`() {
+        val lines = listOf(line(0), line(1_000), line(2_500))
+        assertEquals(listOf(0L, 1_000L, 2_500L), LyricFocus.startTimes(lines).toList())
+    }
 }

@@ -21,6 +21,14 @@ final class BeatThisCoreML: BeatAccelerator, @unchecked Sendable {
         category: "Automix"
     )
 
+    /// Profiling override: `defaults write <bundle> BeatThisComputeUnits cpu|ane`.
+    static var computeUnits: MLComputeUnits {
+        switch UserDefaults.standard.string(forKey: "BeatThisComputeUnits") {
+        case "cpu": return .cpuOnly
+        default: return .cpuAndNeuralEngine
+        }
+    }
+
     private let model: MLModel
     /// Predicted one window at a time. `MLModel` is documented as safe to call
     /// concurrently, but serialising keeps the Neural Engine request queue
@@ -31,7 +39,7 @@ final class BeatThisCoreML: BeatAccelerator, @unchecked Sendable {
 
     init?(modelURL: URL) {
         let configuration = MLModelConfiguration()
-        configuration.computeUnits = .cpuAndNeuralEngine
+        configuration.computeUnits = Self.computeUnits
         do {
             model = try MLModel(contentsOf: modelURL, configuration: configuration)
         } catch {

@@ -16,7 +16,7 @@ extension PlaybackController {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
         lyricsAligning = false
-        lyricsAlignedLocally = false
+        lyricsAlignedLocally = nil
         lyricsRequestGeneration &+= 1
         let requestGeneration = lyricsRequestGeneration
         lyricsNeedsDurationRefresh = false
@@ -161,15 +161,26 @@ extension PlaybackController {
         let engine = self.engine
         let headers = loadedSourceHeaders
         let decode: LyricsAudioAligner.Decode = { start, length in
-            guard let region = engine.decodeRegionWithHeaders(
+            // 16 kHz is what speech recognition takes; bytes cross the bridge
+            // in one copy where a float array is read back one at a time.
+            guard let region = engine.decodeRegionPcm(
                 source: source,
                 startSeconds: start,
                 durationSeconds: length,
-                mono: true,
-                headers: headers
+                headers: headers,
+                targetRate: 16_000
             ) else { return nil }
+            let count = region.pcm.count / MemoryLayout<Float>.size
+            let samples = [Float](unsafeUninitializedCapacity: count) { buffer, initialized in
+                region.pcm.withUnsafeBytes { raw in
+                    UnsafeMutableRawBufferPointer(buffer).copyMemory(
+                        from: UnsafeRawBufferPointer(rebasing: raw.prefix(count * MemoryLayout<Float>.size))
+                    )
+                }
+                initialized = count
+            }
             return LyricsAudioAligner.Region(
-                samples: region.samples,
+                samples: samples,
                 sampleRate: Double(region.sampleRate),
                 startSeconds: region.startSeconds
             )
@@ -177,10 +188,11 @@ extension PlaybackController {
 
         lyricsAligning = true
         lyricsAlignmentTask = Task { @MainActor [weak self] in
-            let aligned = await LyricsAudioAligner.align(
+            let coverage = await LyricsAudioAligner.align(
                 lines: lines,
                 durationSeconds: trackDuration,
                 decode: decode,
+                playhead: { [weak self] in self?.position ?? 0 },
                 onUpdate: { [weak self] updated in
                     guard let self,
                           self.current?.id == entry.id,
@@ -189,6 +201,7 @@ extension PlaybackController {
                     self.lyrics = updated
                 }
             )
+            MemoryRelief.soon()
             guard let self,
                   self.current?.id == entry.id,
                   self.lyricsRequestGeneration == requestGeneration
@@ -197,11 +210,12 @@ extension PlaybackController {
             // The mark is the honest one: it says the word timings came from
             // this app's ears, not the provider's, so a listener who finds a
             // badly-synced line knows whom to tell.
-            self.lyricsAlignedLocally = aligned
+            self.lyricsAlignedLocally = coverage
             self.lyricsAlignmentTask = nil
-            NSLog("[BitChord] local lyric alignment %@ for %@",
-                  aligned ? "added word timings" : "found no confident word matches",
-                  entry.title)
+            PlaybackDebugLog.shared.record(
+                "lyrics: local alignment timed \(coverage.timed) of \(coverage.total) lines",
+                about: entry.id
+            )
         }
     }
 }

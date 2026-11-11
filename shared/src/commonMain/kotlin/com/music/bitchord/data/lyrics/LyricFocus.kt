@@ -52,14 +52,15 @@ object LyricFocus {
         // sung" that answers "one of them" for a transcript with no times is a
         // trap for every caller rather than for one.
         if (!isSynced(lines)) return emptyList()
-        val latest = lines.indexOfLast { lineStartMs(it) <= positionMs }
+        val starts = startTimes(lines)
+        val latest = starts.indexOfLast { it <= positionMs }
         if (latest < 0) return emptyList()
         return (0..latest).filter { index ->
             val line = lines[index]
             !line.isGap && (index == latest || (
                 !line.isGap &&
                     (line.hasKnownEnd || line.background?.hasKnownEnd == true) &&
-                    lineStartMs(line) <= positionMs && positionMs < line.endMs
+                    starts[index] <= positionMs && positionMs < line.endMs
                 ))
         }
     }
@@ -76,10 +77,11 @@ object LyricFocus {
      * few seconds in is every track that opens on an intro.
      */
     fun scrollLead(lines: List<LyricLineDto>, positionMs: Long): Long {
-        val current = lines.indexOfLast { lineStartMs(it) <= positionMs }
+        val starts = startTimes(lines)
+        val current = starts.indexOfLast { it <= positionMs }
         if (current < 0) return SCROLL_LEAD_MIN_MS
-        val next = lines.getOrNull(current + 1) ?: return SCROLL_LEAD_MIN_MS
-        val gap = lineStartMs(next) - lines[current].endMs
+        if (current + 1 >= lines.size) return SCROLL_LEAD_MIN_MS
+        val gap = starts[current + 1] - lines[current].endMs
         return gap.coerceIn(SCROLL_LEAD_MIN_MS, SCROLL_LEAD_MAX_MS)
     }
 
@@ -94,7 +96,9 @@ object LyricFocus {
         val active = activeRows(lines, positionMs)
         if (active.isNotEmpty()) return active.first()
         if (!isSynced(lines)) return -1
-        return lines.indexOfLast { !it.isGap && lineStartMs(it) <= positionMs + scrollLead(lines, positionMs) }
+        val starts = startTimes(lines)
+        val reach = positionMs + scrollLead(lines, positionMs)
+        return lines.indices.lastOrNull { !lines[it].isGap && starts[it] <= reach } ?: -1
     }
 
     /** Whether any line or word carries a real timestamp, rather than a transcript. */
@@ -104,6 +108,51 @@ object LyricFocus {
                 background.timeMs > 0L || background.words.any { it.startMs > 0L || it.endMs > 0L }
             } == true
     }
+
+    /**
+     * When each line starts, for placing the playhead among them.
+     *
+     * A lyric the app is timing itself is partly timed for a while: some lines
+     * have been heard, the rest still read zero. Taken at face value a zero is
+     * "already started", so the *last* untimed line in the song always counted
+     * as the latest line passed, and the highlight leapt to a chorus minutes
+     * ahead and back again each time a nearer line was timed. An untimed line
+     * is instead placed between the timed lines around it, in proportion to
+     * its position; past the last timed line, a few seconds a line after it.
+     * A fully timed document comes back unchanged.
+     */
+    fun startTimes(lines: List<LyricLineDto>): LongArray {
+        val raw = LongArray(lines.size) { lineStartMs(lines[it]) }
+        // Line 0 at zero is the top of the song either way.
+        val known = BooleanArray(lines.size) { it == 0 || raw[it] > 0L }
+        if (known.all { it }) return raw
+        val starts = raw.copyOf()
+        var previous = 0
+        var index = 1
+        while (index < lines.size) {
+            if (known[index]) {
+                previous = index
+                index += 1
+                continue
+            }
+            var next = index
+            while (next < lines.size && !known[next]) next += 1
+            val base = raw[previous]
+            for (missing in index until next) {
+                val steps = (missing - previous).toLong()
+                starts[missing] = if (next < lines.size) {
+                    base + (raw[next] - base).coerceAtLeast(0L) * steps / (next - previous)
+                } else {
+                    base + UNTIMED_LINE_MS * steps
+                }
+            }
+            index = next
+        }
+        return starts
+    }
+
+    /** About how long a sung line lasts, for lines after the last timed one. */
+    private const val UNTIMED_LINE_MS: Long = 4_000L
 
     /** A missing line stamp falls back to the first word's timestamp. */
     private fun lineStartMs(line: LyricLineDto): Long = if (line.timeMs == 0L) {

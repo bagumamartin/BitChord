@@ -179,6 +179,15 @@ internal class EjsChallengeSolver(
         requestOrder: List<Pair<String, List<String>>>,
         preprocessed: Boolean,
     ): SolveResult {
+        if (preprocessed) {
+            try {
+                preparedSolve(playerUrl, playerInputText, requestOrder)?.let { return it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Fall through to the full jsc() path below.
+            }
+        }
         val requests =
             buildJsonArray {
                 for ((kind, challenges) in requestOrder) {
@@ -280,6 +289,79 @@ internal class EjsChallengeSolver(
                 it.second.size
             }} elapsed=${Clock.System.now().toEpochMilliseconds() - evaluateStartMs}ms player=${playerUrl.logId()}",
         )
+        return parseOutput(playerUrl, raw, requestOrder)
+    }
+
+    /**
+     * Every jsc() call with a preprocessed player re-parses and re-compiles that
+     * multi-megabyte script inside the payload literal, then leaves it for the
+     * collector — the JS thread and its GC were the second-largest CPU cost of a
+     * track change. The preprocessed player only defines the `n` / `sig`
+     * transforms on `_result`, so compile it once per player and call those
+     * functions directly. Anything unexpected returns null (or an incomplete
+     * result) and the caller falls back to jsc().
+     */
+    private suspend fun preparedSolve(
+        playerUrl: String,
+        preprocessedPlayer: String,
+        requestOrder: List<Pair<String, List<String>>>,
+    ): SolveResult? {
+        val key = QuickJsEngine.jsStringLiteral(
+            "$playerUrl#${preprocessedPlayer.length}#${preprocessedPlayer.hashCode()}",
+        )
+        val ready = engine.evaluate(
+            "(globalThis.__bchPrepared && globalThis.__bchPrepared.key === $key) ? 'yes' : 'no'",
+            8,
+        ).trim()
+        if (ready != "yes") {
+            val literal = QuickJsEngine.jsStringLiteral(preprocessedPlayer)
+            if (literal.length > MAX_PAYLOAD_LENGTH) return null
+            engine.execute(
+                "globalThis.__bchPrepared = null;" +
+                    "(function(){ var r = {}; Function('_result', $literal)(r);" +
+                    " globalThis.__bchPrepared = {key: $key, fns: r}; })();",
+            )
+        }
+        val requests =
+            buildJsonArray {
+                for ((kind, challenges) in requestOrder) {
+                    if (challenges.isEmpty()) continue
+                    add(
+                        buildJsonObject {
+                            put("type", kind)
+                            putJsonArray("challenges") { for (c in challenges) add(JsonPrimitive(c)) }
+                        },
+                    )
+                }
+            }
+        val requestsJson = payloadJson.encodeToString(JsonElement.serializer(), requests)
+        val js =
+            """
+            (function() {
+              var p = globalThis.__bchPrepared;
+              if (!p || p.key !== $key) return JSON.stringify({"type":"error","error":"not prepared"});
+              var reqs = $requestsJson;
+              var out = {"type":"result","responses":[]};
+              for (var i = 0; i < reqs.length; i++) {
+                var q = reqs[i];
+                var fn = p.fns[q.type];
+                if (typeof fn !== "function") { out.responses.push({"type":"error","error":"no transform"}); continue; }
+                var data = {};
+                var ok = true;
+                for (var j = 0; j < q.challenges.length; j++) {
+                  try {
+                    var v = fn(q.challenges[j]);
+                    var text = v == null ? "" : String(v);
+                    if (!text || text.length > $MAX_SOLVER_OUTPUT_LENGTH || text.indexOf("enhanced_except_") === 0) { ok = false; break; }
+                    data[q.challenges[j]] = text;
+                  } catch (e) { ok = false; break; }
+                }
+                out.responses.push(ok ? {"type":"result","data":data} : {"type":"error","error":"transform failed"});
+              }
+              return JSON.stringify(out);
+            })()
+            """
+        val raw = engine.evaluate(js, MAX_RAW_OUTPUT_LENGTH).trim()
         return parseOutput(playerUrl, raw, requestOrder)
     }
 

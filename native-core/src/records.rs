@@ -288,6 +288,14 @@ pub struct DecodedRegion {
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
+pub struct DecodedPcm {
+    /// Mono samples as little-endian f32 bytes.
+    pub pcm: Vec<u8>,
+    pub sample_rate: u32,
+    pub start_seconds: f64,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,

@@ -548,16 +548,22 @@ struct PlayingBars: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(0..<3, id: \.self) { index in
+                // Scaled, not resized: an animated frame height is a layout
+                // change, and a layout change re-lays out the whole window it
+                // sits in, every frame, for as long as the song plays — about
+                // a third of a core with the playing row on Home. A scale is
+                // drawn, never laid out.
                 Capsule()
                     .fill(color)
-                    .frame(width: 2.5, height: height(index))
+                    .frame(width: 2.5, height: 11)
+                    .scaleEffect(x: 1, y: height(index) / 11, anchor: .bottom)
+                    .animation(
+                        reduceMotion ? nil : .easeInOut(duration: 0.5).repeatForever(autoreverses: true),
+                        value: phase
+                    )
             }
         }
         .frame(width: 14, height: 11, alignment: .bottom)
-        .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.5).repeatForever(autoreverses: true),
-            value: phase
-        )
         .onAppear { phase = true }
         .accessibilityLabel("Playing")
     }

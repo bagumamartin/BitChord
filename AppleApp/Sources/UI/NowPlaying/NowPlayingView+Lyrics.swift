@@ -79,7 +79,14 @@ extension NowPlayingView {
     /// interaction: the strip is a preview of a pane rather than a display of its
     /// own, and a line of text that looks like the lyrics but cannot be reached
     /// by tapping it is the one part of the player a listener would try and fail.
+    @ViewBuilder
     var currentLyricStrip: some View {
+        // Settings › Lyrics on Player. Hidden, nothing holds its place, so the
+        // controls close up under the credits.
+        if showsLyricLine { lyricStripButton }
+    }
+
+    private var lyricStripButton: some View {
         Button {
             Haptics.play(.expand)
             pane = pane == .lyrics ? .main : .lyrics

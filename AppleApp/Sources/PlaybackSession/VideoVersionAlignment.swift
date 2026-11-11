@@ -108,7 +108,7 @@ actor VideoVersionAlignment {
             catch { return nil }
             let songAudio = work.appendingPathComponent("song.audio")
             let videoAudio = work.appendingPathComponent("video.audio")
-            defer { try? FileManager.default.removeItem(at: work) }
+            defer { try? FileManager.default.removeItem(at: work); MemoryRelief.soon() }
             let fetchStarted = Date()
             do {
                 async let song: Void = Self.download(videoId: songId, to: songAudio)

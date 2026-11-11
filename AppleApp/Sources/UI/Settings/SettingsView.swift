@@ -40,6 +40,7 @@ struct SettingsView: View {
     @State var reduceAnimation = PlatformSettings.shared.getBoolean(key: "reduce_animation", default: false)
     @State var fullBleed = PlatformSettings.shared.getBoolean(key: "full_bleed_artwork", default: true)
     @AppStorage("lyrics_blur") var lyricsBlur = true
+    @AppStorage("player_lyric_line") var playerLyricLine = true
     @AppStorage("show_music_videos") var showMusicVideos = false
     @State var videoOverCellular = PlatformSettings.shared.getBoolean(key: "video_over_cellular", default: false)
     @AppStorage("translation_language") var translationLanguage = ""

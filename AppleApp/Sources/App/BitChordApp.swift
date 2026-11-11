@@ -383,7 +383,11 @@ func reloadAutomixModels(playbackStarted: Bool) async {
 @Observable
 final class AppModel {
     var scenePhase: ScenePhase = .active
-    var nowPlayingPresented = false
+    var nowPlayingPresented = false {
+        // Pages pushed over the player leave with it; reopening the player
+        // shows the player, not the last page someone browsed from it.
+        didSet { if !nowPlayingPresented, !playerPath.isEmpty { playerPath = [] } }
+    }
     /// Presented by the account control in each iPhone tab's own toolbar.
     var settingsPresented = false
     /// Cross-tab navigation request — RootView observes and consumes it.
@@ -397,9 +401,11 @@ final class AppModel {
     /// still being handled.
     var searchFocusTrigger = 0
     var pendingDetail: BrowseDestination?
-    /// An artist page to push on the Mac window's browse stack, so it is part
-    /// of back/forward history rather than a sheet over the window.
+    /// A page opened from the player, to push on the Mac window's browse stack
+    /// with the player as the step back.
     var pendingArtistPage: BrowseDestination?
+    /// Pages pushed over the player on iPhone and iPad. Back pops to the player.
+    var playerPath: [BrowseDestination] = []
     var playlistPicker: PlaylistPickerRequest?
     var downloadManagerPresented = false
     var replayPresented = false
@@ -513,9 +519,13 @@ final class AppModel {
     /// is looked up among YouTube Music's artists and opened only on an exact
     /// name match; a near miss would open somebody else's page, so it falls
     /// back to a search for the name instead.
+    ///
+    /// The player is not touched until the page is known. It used to be
+    /// dismissed first and the page shown after the lookup, so the listener
+    /// watched the player close onto whatever page it covered, then the artist
+    /// arrive — and back led to that covered page, never to the player.
     @MainActor
     func openArtist(named name: String, knownId: String?) {
-        nowPlayingPresented = false
         Task { @MainActor in
             var browseId = knownId
             if browseId == nil {
@@ -523,32 +533,40 @@ final class AppModel {
                 browseId = Self.artistMatch(name, in: hits)?.browseId
             }
             guard let browseId else {
+                nowPlayingPresented = false
                 pendingSearchQuery = name
                 requestedTab = .search
                 focusSearch = true
                 return
             }
-            await showPage(.detail(browseId: browseId, title: name))
+            showPageFromPlayer(.detail(browseId: browseId, title: name))
         }
     }
 
-    /// Open a browse page (an album from the player's title) over whatever
-    /// the player covered.
+    /// Open a browse page (an album from the player's title) from the player.
     @MainActor
     func openPage(browseId: String, title: String) {
-        nowPlayingPresented = false
-        Task { @MainActor in await showPage(.detail(browseId: browseId, title: title)) }
+        showPageFromPlayer(.detail(browseId: browseId, title: title))
     }
 
+    /// A page opened from the player is one step forward from the player, so
+    /// back returns to it — on every platform.
+    ///
+    /// iPhone and iPad push it on the player's own navigation stack: the player
+    /// stays presented underneath and the system back button (or the edge
+    /// swipe) pops straight back to it. The Mac pushes it on the window's
+    /// browse history with the player marked as the step before, so the
+    /// titlebar's back button (⌘[) reopens the player.
     @MainActor
-    private func showPage(_ destination: BrowseDestination) async {
+    private func showPageFromPlayer(_ destination: BrowseDestination) {
         #if os(macOS)
         pendingArtistPage = destination
         #else
-        // The player is a full-screen cover; a sheet asked for while it is
-        // still leaving is dropped, so wait out the dismissal.
-        try? await Task.sleep(for: .milliseconds(450))
-        pendingDetail = destination
+        if nowPlayingPresented {
+            playerPath.append(destination)
+        } else {
+            pendingDetail = destination
+        }
         #endif
     }
 
