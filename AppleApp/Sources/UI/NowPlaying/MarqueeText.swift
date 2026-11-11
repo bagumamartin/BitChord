@@ -38,7 +38,9 @@ struct Marquee<Content: View>: View {
             .fixedSize()
             .hidden()
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { contentWidth = $0 }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // minWidth 0: without it the frame never goes below its child, so
+            // the full-length line widened the whole player column.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { boxWidth = $0 }
             .overlay(alignment: .leading) {
                 TimelineView(.animation(paused: !crawls)) { context in
@@ -48,7 +50,7 @@ struct Marquee<Content: View>: View {
                         if crawls { content.fixedSize() }
                     }
                     .offset(x: -moved)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     .mask(fadeMask(moved: moved))
                 }
             }
