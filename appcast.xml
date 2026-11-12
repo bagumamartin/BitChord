@@ -9,6 +9,29 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.8</title>
+            <pubDate>Thu, 12 Nov 2026 08:16:43 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.8</sparkle:fullReleaseNotesLink>
+            <sparkle:version>17</sparkle:version>
+            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.8
+
+## Playback
+
+- Fixes "Couldn't open a stream for that track" and "confirm you're not a bot" on networks where other YouTube clients still play. BitChord kept presenting the same YouTube identity once it had been flagged, so no retry, network or account could clear it. Each track is now asked for with a fresh anonymous identity, the way the working clients ask, and YouTube cookies are no longer stored.
+- The YouTube extractor is updated to InnerTubeX 0.11.6.
+- A track that fails is no longer asked for again in quick bursts, which could make a flagged network worse.
+- Diagnostic reports now say which YouTube client refused a track and why.
+
+## Security
+
+- rustls 0.23.46.
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.8/BitChord-1.0.8-build17-mac-arm64.dmg" length="19492298" type="application/octet-stream" sparkle:edSignature="N11U6bN8NZfR29kg6oyIJYhMfWsndiVugMhBtDSFAMlzp+PifTqogvq9Aq3Bf+tddyey5/UNjKQhowjQw5cVCA=="/>
+        </item>
+        <item>
             <title>1.0.7</title>
             <pubDate>Wed, 11 Nov 2026 23:36:13 +0000</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.7</sparkle:fullReleaseNotesLink>
@@ -58,56 +81,9 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.6/BitChord-1.0.6-build15-mac-arm64.dmg" length="19185385" type="application/octet-stream" sparkle:edSignature="xoFt+884h3gDggafASt4ZMVxb7Qpqa0UthL8ftckE008/Vk+eCaABcQTHUEiFoMztvtaeS73MgC6/sheOsm3Cw=="/>
         </item>
-        <item>
-            <title>1.0.5</title>
-            <pubDate>Wed, 11 Nov 2026 11:06:08 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.5</sparkle:fullReleaseNotesLink>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.5
-
-## Artist pages
-
-- Artist pages follow the YouTube Music layout: the name over the artwork, then Shuffle, a large Play button and Subscribe.
-- Top songs have their own heading. Each shelf shows five items with **Show all**, and About comes last with the description, subscriber count and monthly listeners.
-- Every credited artist on a song opens their own page, not only the first. Names without a link are matched exactly, or fall back to a search.
-
-## Now Playing
-
-- The title and artist scroll when they don't fit, with the explicit mark, a star and a More button beside them. Tapping the title opens the album.
-- Artwork follows the track that actually loaded, and old embedded artwork is cleared when the track changes.
-- The playback source line sits centred in the timestamp row.
-- **Mac:** opening the player from a pushed page, such as an artist page, no longer hides the sidebar with no way back. Closing the player returns you to that page.
-
-## Loading screens
-
-- Loading placeholders now have the shape of the page they stand in for: Home shelves, library grids, artist and album pages, Explore tiles and song rows. They no longer jump or resize while they shimmer.
-
-## Playback and lyrics
-
-- When playback fails while you are signed in, BitChord no longer asks you to sign in. A bot check is reported only when YouTube says so for every client; otherwise you get network advice.
-- KuGou lyrics must match the track's artist and script, so an English song no longer gets another artist's Korean lyrics.
-- Nested TTML markup no longer leaks into lyrics, and XML comments are ignored.
-- Sign-in to YouTube Music asks which account to use.
-
-## Mac
-
-- Single-click playback is now a setting (single or double click). The first click on an inactive window works, and typing in search keeps spaces and arrow keys.
-- Toasts clear the playback pill, wrap instead of truncating, and stay up long enough to read.
-- The compact navigation bar appears only in narrow windows.
-
-## Requirements
-
-- iOS and iPadOS 18 or later. The IPA is unsigned: sign it with your own signing app and identity.
-- macOS 15 or later on Apple Silicon. The DMG is ad-hoc signed; existing installs update through Sparkle.
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.5/BitChord-1.0.5-build14-mac-arm64.dmg" length="19166787" type="application/octet-stream" sparkle:edSignature="k2wmWYr8wZBsGGighCuW8BR4zfsyCvEPGyiRCp+3j1Goj5oQwwj9fCY3ZoiIbBh8gYL55IIwywl6SMtpNqhCBg=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: dTWv19uwm//vLXptXmx7ZcsasqMv3p1moOMPw0FOJYJg3bfEi7d69o2zE42MkscBwLDBZ9uZN7cjK9bpzD7uAw==
-length: 7208
+edSignature: nmhIiYcQ6cTOCT1+c6XlctNAdfXSus88zpg11GT9CBadVzcAul4uU3+IPQGlSJp9McOwshk1jrdcTUURAf9cAQ==
+length: 5686
 -->
