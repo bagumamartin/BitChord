@@ -237,14 +237,26 @@ struct RootView: View {
             macInspector = .lyrics
             appModel.lyricsRevealRequested = false
         }
-        // An artist opened from the player's credit line is pushed on the
-        // window's browse stack, so back returns to the page it covered.
+        // A page opened from the player (an artist from the credit line, the
+        // album from the title) is pushed on the window's browse stack with
+        // the player as the step back: back, or ⌘[, reopens the player rather
+        // than landing on whatever page the player had covered. The player
+        // closes in the same update as the push, so nothing in between shows.
         .onChange(of: appModel.pendingArtistPage) { _, destination in
             guard case .detail(let browseId, let title) = destination else { return }
             appModel.pendingArtistPage = nil
-            navigator.path.append(PushRoute(id: UUID()) {
+            let route = PushRoute(id: UUID()) {
                 AnyView(DetailView(browseId: browseId, initialTitle: title))
-            })
+            }
+            if appModel.nowPlayingPresented {
+                navigator.pushFromPlayer(route)
+                appModel.nowPlayingPresented = false
+            } else {
+                navigator.path.append(route)
+            }
+        }
+        .onAppear {
+            navigator.onReturnToPlayer = { [appModel] in appModel.nowPlayingPresented = true }
         }
         #endif
         .preferredColorScheme(appModel.preferredScheme)
@@ -1126,16 +1138,36 @@ struct NowPlayingTakeover: ViewModifier {
                 // as a floating card on iPadOS 27, and only a cover is
                 // guaranteed edge to edge.
                 content.fullScreenCover(isPresented: $isPresented) {
-                    NowPlayingView()
+                    PlayerNavigationStack()
                         .navigationTransition(.zoom(sourceID: NowPlayingZoom.sourceID, in: zoomNamespace))
                 }
             } else {
                 content.sheet(isPresented: $isPresented) {
-                    NowPlayingView()
+                    PlayerNavigationStack()
                         .modifier(NowPlayingSheetSizing())
                         .navigationTransition(.zoom(sourceID: NowPlayingZoom.sourceID, in: zoomNamespace))
                 }
             }
+        }
+    }
+}
+
+/// The player as the root of its own stack, so an artist or album opened from
+/// it is pushed over it and the system back button returns to it.
+private struct PlayerNavigationStack: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        @Bindable var appModel = appModel
+        NavigationStack(path: $appModel.playerPath) {
+            NowPlayingView()
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(for: BrowseDestination.self) { destination in
+                    switch destination {
+                    case .detail(let browseId, let title):
+                        DetailView(browseId: browseId, initialTitle: title)
+                    }
+                }
         }
     }
 }

@@ -61,11 +61,16 @@ fn analysis_cache_hits_by_identity_and_misses_when_the_file_grows() {
         "a hit returns the same analysis"
     );
 
-    let _ = analysis_cache::get_or_compute(&key, false, 91.0, &mut compute);
+    // A second's disagreement is the catalogue's whole seconds against the
+    // decoder's exact length for the same file: still a hit.
+    let _ = analysis_cache::get_or_compute(&key, false, 90.6, &mut compute);
+    assert_eq!(computed.load(Ordering::SeqCst), 1, "the same file under a rounded length is a hit");
+
+    let _ = analysis_cache::get_or_compute(&key, false, 120.0, &mut compute);
     assert_eq!(
         computed.load(Ordering::SeqCst),
         2,
-        "a newly learned duration must not reuse an unknown-duration analysis"
+        "a materially different duration must be analysed again"
     );
 
     // The same path with more bytes is a different file as far as planning

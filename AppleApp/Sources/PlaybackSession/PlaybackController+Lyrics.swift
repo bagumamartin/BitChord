@@ -16,7 +16,7 @@ extension PlaybackController {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
         lyricsAligning = false
-        lyricsAlignedLocally = false
+        lyricsAlignedLocally = nil
         lyricsAlignmentState = .idle
         lyricsRequestGeneration &+= 1
         let requestGeneration = lyricsRequestGeneration
@@ -108,7 +108,7 @@ extension PlaybackController {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
         lyricsAligning = false
-        lyricsAlignedLocally = false
+        lyricsAlignedLocally = nil
         lyricsAlignmentState = .idle
         lyrics = lines
         lyricsSourceLabel = label.isEmpty ? nil : label
@@ -159,7 +159,7 @@ extension PlaybackController {
         allowPermissionRequest: Bool = false,
         useCache: Bool = true
     ) {
-        guard lines.contains(where: { !$0.isGap && $0.words.isEmpty }),
+        guard lines.contains(where: LyricsAudioAligner.needsWords),
               let source = loadedSourcePath,
               !source.isEmpty
         else { lyricsAlignmentState = .idle; return }
@@ -178,22 +178,37 @@ extension PlaybackController {
         )
         if useCache, let cached = LyricsAlignmentCache.value(for: cacheKey) {
             lyrics = cached
-            lyricsAlignedLocally = true
-            lyricsAlignmentState = cached.contains(where: { !$0.isGap && $0.words.isEmpty }) ? .partial : .complete
+            let total = lines.filter(LyricsAudioAligner.needsWords).count
+            let timed = zip(lines, cached).filter { pair in
+                LyricsAudioAligner.needsWords(pair.0) && !pair.1.words.isEmpty
+            }.count
+            lyricsAlignedLocally = LyricsAudioAligner.Coverage(timed: timed, total: total)
+            lyricsAlignmentState = timed == total ? .complete : .partial
             return
         }
         let engine = self.engine
         let headers = loadedSourceHeaders
         let decode: LyricsAudioAligner.Decode = { start, length in
-            guard let region = engine.decodeRegionWithHeaders(
+            // 16 kHz is what speech recognition takes; bytes cross the bridge
+            // in one copy where a float array is read back one at a time.
+            guard let region = engine.decodeRegionPcm(
                 source: source,
                 startSeconds: start,
                 durationSeconds: length,
-                mono: true,
-                headers: headers
+                headers: headers,
+                targetRate: 16_000
             ) else { return nil }
+            let count = region.pcm.count / MemoryLayout<Float>.size
+            let samples = [Float](unsafeUninitializedCapacity: count) { buffer, initialized in
+                region.pcm.withUnsafeBytes { raw in
+                    UnsafeMutableRawBufferPointer(buffer).copyMemory(
+                        from: UnsafeRawBufferPointer(rebasing: raw.prefix(count * MemoryLayout<Float>.size))
+                    )
+                }
+                initialized = count
+            }
             return LyricsAudioAligner.Region(
-                samples: region.samples,
+                samples: samples,
                 sampleRate: Double(region.sampleRate),
                 startSeconds: region.startSeconds
             )
@@ -202,10 +217,11 @@ extension PlaybackController {
         lyricsAligning = true
         lyricsAlignmentState = .analyzing
         lyricsAlignmentTask = Task { @MainActor [weak self] in
-            let outcome = await LyricsAudioAligner.align(
+            let coverage = await LyricsAudioAligner.align(
                 lines: lines,
                 durationSeconds: trackDuration,
                 decode: decode,
+                playhead: { [weak self] in self?.position ?? 0 },
                 allowPermissionRequest: allowPermissionRequest,
                 onState: { [weak self] state in
                     guard let self,
@@ -224,6 +240,7 @@ extension PlaybackController {
                     self.lyrics = updated
                 }
             )
+            MemoryRelief.soon()
             guard let self,
                   !Task.isCancelled,
                   self.current?.id == entry.id,
@@ -233,15 +250,18 @@ extension PlaybackController {
             // The mark is the honest one: it says the word timings came from
             // this app's ears, not the provider's, so a listener who finds a
             // badly-synced line knows whom to tell.
-            self.lyricsAlignedLocally = outcome == .complete || outcome == .partial
-            self.lyricsAlignmentState = outcome
-            if outcome == .complete || outcome == .partial {
+            self.lyricsAlignedLocally = coverage
+            if coverage.timed > 0 {
                 LyricsAlignmentCache.insert(self.lyrics, for: cacheKey)
             }
+            if coverage.timed == 0 && self.lyricsAlignmentState == .analyzing {
+                self.lyricsAlignmentState = .noMatch
+            }
             self.lyricsAlignmentTask = nil
-            NSLog("[BitChord] local lyric alignment %@ for %@",
-                  outcome == .complete || outcome == .partial ? "added word timings" : "alignment did not complete",
-                  entry.title)
+            PlaybackDebugLog.shared.record(
+                "lyrics: local alignment timed \(coverage.timed) of \(coverage.total) lines",
+                about: entry.id
+            )
         }
     }
 
@@ -250,7 +270,7 @@ extension PlaybackController {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
         lyricsAligning = false
-        lyricsAlignedLocally = false
+        lyricsAlignedLocally = nil
         lyricsAlignmentState = .idle
         alignFetchedLyricsIfNeeded(
             lyrics,

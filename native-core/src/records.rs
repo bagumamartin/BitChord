@@ -288,6 +288,14 @@ pub struct DecodedRegion {
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
+pub struct DecodedPcm {
+    /// Mono samples as little-endian f32 bytes.
+    pub pcm: Vec<u8>,
+    pub sample_rate: u32,
+    pub start_seconds: f64,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
 pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
@@ -397,7 +405,7 @@ impl OutputPcmMode {
 
 /// CPU budget for Automix analysis (upstream `AutomixPerformanceMode`).
 ///
-/// Per-run RTen pools cap neural inference at 1 / 2 / 4 workers, limited by
+/// Per-run RTen pools cap neural inference at 1 / 1 / 4 workers, limited by
 /// available CPUs. EFFICIENT also skips the open-unmix vocal model; BALANCED
 /// and PERFORMANCE run the full graphs with different parallelism budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,7 +417,19 @@ pub enum AutomixTier {
 
 impl AutomixTier {
     pub(crate) fn inference_threads(self) -> usize {
-        match self { Self::Efficient => 1, Self::Balanced => 2, Self::Performance => 4 }
+        // BALANCED is one worker: the planner's own thread plus two inference
+        // workers put a transition's analysis on three cores at once, which is
+        // the burst above 100% a listener sees. A plan has the rest of the song
+        // to finish in, so taking twice as long on one core costs nothing
+        // audible. PERFORMANCE is the opt-in for speed over a quiet machine.
+        match self { Self::Efficient => 1, Self::Balanced => 1, Self::Performance => 4 }
+    }
+    /// The share of one core a transition plan may hold (see `pace`). One
+    /// worker still ran flat out for seconds, a core on its own; paced, the
+    /// planner leaves room for the interface and the mixer and the plan lands
+    /// a few seconds later, long before the transition it is for.
+    pub(crate) fn analysis_duty(self) -> Option<f64> {
+        match self { Self::Efficient => Some(0.5), Self::Balanced => Some(0.6), Self::Performance => None }
     }
     pub(super) fn parse(mode: &str) -> Self {
         match mode {

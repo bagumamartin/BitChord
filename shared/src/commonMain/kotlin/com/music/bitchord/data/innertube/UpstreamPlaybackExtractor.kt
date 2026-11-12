@@ -82,6 +82,8 @@ internal object UpstreamPlaybackExtractor {
     fun onRefused(url: String, excludeClient: Boolean = false) {
         val origin = issued.load()[url] ?: return
         if (origin.generation != Innertube.sessionGeneration) return
+        // The URL was minted for a visitor googlevideo has now refused.
+        if (origin.profile == CleanVisionClient.PROFILE) CleanVisionClient.forgetVisitor()
         if (excludeClient) while (true) {
             val old = excluded.load()
             val next = (if (old.size >= 64) emptyMap() else old) + ("${origin.generation}:${origin.id}:${origin.profile}" to TimeSource.Monotonic.markNow())
@@ -112,6 +114,7 @@ internal object UpstreamPlaybackExtractor {
             if (excluded.compareAndSet(old, next)) break
         }
         PlaybackTokenBridge.invalidate()
+        CleanVisionClient.forgetVisitor()
     }
     private val lock = Mutex()
     private var session: Session? = null
@@ -142,6 +145,10 @@ internal object UpstreamPlaybackExtractor {
             }
             val store = RemotePlayerConfigStore(Http.client, repository, logger)
             val cipher = YouTubeCipherService(Http.client, store, logger)
+            cipher.setPreprocessedPlayerCache(
+                read = { PreprocessedPlayerStore.read(it) },
+                write = { key, value -> PreprocessedPlayerStore.write(key, value) },
+            )
             val extractor = InnerTubeExtractor(
                 configParser = com.metrolist.innertubex.extraction.YtConfigParserImpl(Http.client, tube, store, cipherService = cipher),
                 cipherService = cipher, innerTube = tube, tokenProvider = PlaybackTokenBridge.tokenProvider(), logger = logger)
@@ -149,18 +156,42 @@ internal object UpstreamPlaybackExtractor {
         }
     }
     suspend fun extract(videoId: String, maxKbps: Int): StreamResolver.ResolvedStream? {
+        cleanFirst(videoId, maxKbps)?.let { return it }
         val stream = extractStream(videoId, maxKbps) ?: return null
         check(stream.sabrBootstrap == null) { "This audio engine requires a progressive stream" }
-        while (true) {
-            val old = issued.load()
-            val next = (if (old.size >= 64) emptyMap() else old) + (stream.audioUrl to Issued(videoId, stream.profileId, Innertube.sessionGeneration))
-            if (issued.compareAndSet(old, next)) break
-        }
+        remember(stream.audioUrl, Issued(videoId, stream.profileId, Innertube.sessionGeneration))
         DebugLog.d("$videoId: upstream ${stream.profileId} selected ${(stream.bitrate ?: 0) / 1000}kbps")
         return StreamResolver.ResolvedStream(stream.audioUrl, (stream.bitrate ?: 0) / 1000,
             stream.mimeType.orEmpty() + (stream.codecs?.let { "; codecs=\"$it\"" } ?: ""),
             stream.headers, stream.loudnessDb, stream.mediaMetadata?.durationSeconds?.takeIf { it > 0 },
             stream.profileId)
+    }
+
+    /**
+     * [CleanVisionClient] before anything else, unless it already failed this
+     * track at the CDN. Null hands the track to the extraction stack.
+     */
+    private suspend fun cleanFirst(videoId: String, maxKbps: Int): StreamResolver.ResolvedStream? {
+        val generation = Innertube.sessionGeneration
+        if (excludedProfiles(generation, videoId).contains(CleanVisionClient.PROFILE)) return null
+        val served = CleanVisionClient.resolve(videoId, maxKbps) as? CleanVisionClient.Outcome.Served ?: return null
+        Innertube.checkSession(generation)
+        remember(served.stream.url, Issued(videoId, CleanVisionClient.PROFILE, generation))
+        DebugLog.d("$videoId: clean visionOS selected ${served.stream.kbps}kbps")
+        return served.stream
+    }
+
+    private fun excludedProfiles(generation: Long, videoId: String): Set<String> =
+        excluded.load().filter { (key, at) ->
+            key.startsWith("$generation:$videoId:") && at.elapsedNow() < 5.minutes
+        }.keys.map { it.substringAfterLast(":") }.toSet()
+
+    private fun remember(url: String, origin: Issued) {
+        while (true) {
+            val old = issued.load()
+            val next = (if (old.size >= 64) emptyMap() else old) + (url to origin)
+            if (issued.compareAndSet(old, next)) break
+        }
     }
 
     /**
@@ -247,6 +278,10 @@ internal object UpstreamPlaybackExtractor {
         return chosen
     }
 
+    /** A media URL that can be fetched as it stands: an allowed host and no `n` left to transform. */
+    internal fun isReadyMediaUrl(value: String): Boolean =
+        isAllowedVideoUrl(value) && !N_PARAMETER_REGEX.containsMatchIn(value)
+
     /** The extractor's own media-host rule: https, port 443, `/videoplayback` on a Google host. */
     private fun isAllowedVideoUrl(value: String): Boolean =
         runCatching {
@@ -268,9 +303,7 @@ internal object UpstreamPlaybackExtractor {
                 },
             )
                 .withStreamCapabilities(allowHls = false, allowSabr = false, allowBoundedRange = true),
-            excludedClients = excluded.load().filter { (key, at) ->
-                key.startsWith("${session.generation}:$videoId:") && at.elapsedNow() < 5.minutes
-            }.keys.map { it.substringAfterLast(":") }.toSet(),
+            excludedClients = excludedProfiles(session.generation, videoId) - CleanVisionClient.PROFILE,
             audioQuality = if (maxKbps <= 64) AudioQuality.LOW else AudioQuality.AUTO,
             clientPlaybackNonce = generateClientPlaybackNonce()) ?: return null
         Innertube.checkSession(session.generation)

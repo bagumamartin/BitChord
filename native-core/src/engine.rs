@@ -1022,6 +1022,39 @@ impl PlayerEngine {
             .ok()
     }
 
+    /// Mono region as little-endian f32 bytes, resampled down to
+    /// `target_rate` when given. Bytes cross the bridge in one copy.
+    pub fn decode_region_pcm(
+        &self,
+        source: String,
+        start_seconds: f64,
+        duration_seconds: f64,
+        headers: std::collections::HashMap<String, String>,
+        target_rate: Option<u32>,
+    ) -> Option<crate::records::DecodedPcm> {
+        crate::api::decode_region_pcm_impl(&source, start_seconds, duration_seconds, &headers, target_rate)
+            .ok()
+    }
+
+    /// Decode a track once, start to end, into a 16-bit mono WAV at `dest`
+    /// for the system analysis frameworks. False (and no file) on failure.
+    pub fn write_analysis_wav(
+        &self,
+        source: String,
+        dest: String,
+        headers: std::collections::HashMap<String, String>,
+        max_seconds: f64,
+        target_rate: Option<u32>,
+    ) -> bool {
+        match crate::api::write_analysis_wav_impl(&source, &dest, &headers, max_seconds, target_rate) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("analysis wav failed: {error}");
+                false
+            }
+        }
+    }
+
     /// `ComputeBeatSpectrogram` over pre-resampled 22.05 kHz input.
     pub fn mel_spectrogram(&self, samples: Vec<f32>, sample_rate: f64) -> MelSpectrogramResult {
         let BeatSpectrogram { frames, values } =

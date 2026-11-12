@@ -1,6 +1,7 @@
 package com.metrolist.innertubex.extraction.strategy
 
 import com.metrolist.innertubex.extraction.ContentHints
+import com.metrolist.innertubex.extraction.requiresBoundedMediaRange
 import com.metrolist.innertubex.models.YouTubeClient
 
 class ContentAwareFallbackStrategy(
@@ -65,6 +66,7 @@ class ContentAwareFallbackStrategy(
         }
 
         val candidates = mutableListOf<SelectedClient>()
+        val healthDemoted = mutableSetOf<String>()
         val visitorBackedLegacy =
             catalog.find("VISIONOS_0_1")?.manifest?.takeIf {
                 visitorDataAvailable && it.selectionMode == ClientSelectionMode.PROBE_ONLY
@@ -85,7 +87,8 @@ class ContentAwareFallbackStrategy(
                 return@forEach
             }
 
-            val (score, reasons) = score(manifest, request)
+            val (score, reasons, health) = score(manifest, request)
+            if (health <= HEALTH_DEMOTION_THRESHOLD) healthDemoted += manifest.id
             candidates += SelectedClient(manifest.client, manifest, score, reasons)
         }
 
@@ -95,8 +98,14 @@ class ContentAwareFallbackStrategy(
                     when (request.transportPreference) {
                         PlaybackTransportPreference.AUTO -> {
                             when {
+                                // Repeatedly failing clients go behind every healthy transport instead of only losing points.
+                                it.manifest?.id in healthDemoted -> 3
+
+                                // Tokenless gated SABR stops at ~50s with ATTESTATION_REQUIRED (live 2026-10-21); keep token-backed direct audio first.
                                 it.client.useSabr -> 2
-                                request.hints.isKidsContent == true && it.client == YouTubeClient.WEB_KIDS -> 0
+
+                                request.hints.isKidsContent == true && it.client in kidsClients -> 0
+
                                 else -> 1
                             }
                         }
@@ -110,8 +119,10 @@ class ContentAwareFallbackStrategy(
                         }
                     }
                 }.thenBy {
+                    // Only Premium gains quality from cookies; cookie-less clients start video several times faster.
                     if (request.authenticated &&
-                        ((premiumHighQuality && request.premium) || request.hints.wantVideo) &&
+                        request.premium &&
+                        (premiumHighQuality || request.hints.wantVideo) &&
                         request.hints.isKidsContent != true &&
                         it.manifest?.authentication == AuthenticationPolicy.UNSUPPORTED
                     ) {
@@ -127,6 +138,8 @@ class ContentAwareFallbackStrategy(
             rejected = rejected.distinctBy { it.manifest.id }.sortedBy { it.manifest.id },
         )
     }
+
+    private val kidsClients = setOf(YouTubeClient.ANDROID_KIDS, YouTubeClient.WEB_KIDS)
 
     private fun hardRejectionReasons(
         manifest: PlaybackClientManifest,
@@ -151,15 +164,31 @@ class ContentAwareFallbackStrategy(
             if (checkContentSupport && manifest.id == "VISIONOS_0_1" &&
                 (request.hints.wantVideo || contentSupport != CapabilitySupport.SUPPORTED)
             ) {
-                add("legacy direct playback verified for normal audio only")
-            }
-            if (manifest.id in setOf("VISIONOS_0_1", "VISIONOS_SABR") && request.hints.isExplicit == true && request.hints.wantVideo) {
-                add("explicit video playback unverified")
+                add("legacy direct playback verified for normal and explicit audio only")
             }
             if (request.hints.wantVideo &&
                 manifest.transports.none { it == PlaybackTransport.DIRECT || it == PlaybackTransport.SABR }
             ) {
                 add("transport cannot satisfy video request")
+            }
+
+            if (manifest.transports.none { transport ->
+                    when (transport) {
+                        PlaybackTransport.SABR -> {
+                            request.hints.allowSabr
+                        }
+
+                        PlaybackTransport.HLS -> {
+                            request.hints.allowHls
+                        }
+
+                        PlaybackTransport.DIRECT, PlaybackTransport.DASH -> {
+                            request.hints.allowBoundedRange || !requiresBoundedMediaRange(manifest.client.clientName)
+                        }
+                    }
+                }
+            ) {
+                add("available transports disabled")
             }
 
             if (!request.javaScriptRuntimeAvailable && manifest.request.signatureCipher == JavaScriptRequirement.REQUIRED) {
@@ -237,7 +266,7 @@ class ContentAwareFallbackStrategy(
     private fun score(
         manifest: PlaybackClientManifest,
         request: ClientSelectionRequest,
-    ): Pair<Int, List<String>> {
+    ): Triple<Int, List<String>, Int> {
         var score = manifest.priority
         val reasons = mutableListOf("base=${manifest.priority}")
 
@@ -331,6 +360,9 @@ class ContentAwareFallbackStrategy(
                 ClientHealthScope.from(request.hints, request.authenticated),
             )
         if (healthAdjustment != 0) adjust(healthAdjustment, "runtime-health")
-        return score to reasons
+        return Triple(score, reasons, healthAdjustment)
     }
 }
+
+/** About three consecutive failures, or any cooldown, in the default and host trackers. */
+private const val HEALTH_DEMOTION_THRESHOLD = -50

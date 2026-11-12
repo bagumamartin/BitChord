@@ -8,6 +8,59 @@ import kotlin.test.assertNull
 
 class AudioFormatSelectorTest {
     @Test
+    fun mixedAndVideoOnlyInputsNeverSelectVideoAsAudio() {
+        val audio = Format(itag = 140, mimeType = "audio/mp4", bitrate = 128_000, url = "https://audio")
+        val video = Format(itag = 137, mimeType = "video/mp4", bitrate = 5_000_000, width = 1920, height = 1080, url = "https://video")
+        AudioQuality.entries.forEach { quality ->
+            listOf(true, false).forEach { requireUrl ->
+                assertEquals(audio, selectBestAudioFormat(listOf(video, audio), quality, requireUrl))
+                assertNull(selectBestAudioFormat(listOf(video), quality, requireUrl))
+            }
+        }
+    }
+
+    @Test
+    fun prefersOriginalAudioTrackOverHigherBitrateDub() {
+        val dub =
+            Format(
+                itag = 251,
+                mimeType = "audio/webm; codecs=\"opus\"",
+                bitrate = 156_852,
+                url = "https://dub",
+                xtags = "Cg8KBWFjb250EgZkdWJiZWQKCgoEbGFuZxICaWQ",
+                audioTrack = Format.AudioTrack(id = "id.3", audioIsDefault = false),
+            )
+        val original =
+            dub.copy(
+                bitrate = 144_266,
+                url = "https://original",
+                xtags = "ChEKBWFjb250EghvcmlnaW5hbAoNCgRsYW5nEgVlbi1VUw",
+                audioTrack = Format.AudioTrack(id = "en-US.4", audioIsDefault = false),
+            )
+
+        AudioQuality.entries.filter { it != AudioQuality.MP4 }.forEach {
+            assertEquals("https://original", selectBestAudioFormat(listOf(dub, original), it)?.url)
+            assertEquals(
+                "https://original",
+                selectBestAudioFormat(listOf(dub.copy(audioTrack = null), original.copy(audioTrack = null)), it)?.url,
+            )
+        }
+        val defaultOnly = original.copy(xtags = null, audioTrack = Format.AudioTrack(id = "en-US.4", audioIsDefault = true))
+        assertEquals("https://original", selectBestAudioFormat(listOf(dub, defaultOnly))?.url)
+        assertEquals("https://dub", selectBestAudioFormat(listOf(dub))?.url)
+    }
+
+    @Test
+    fun containerPreferencesIgnoreMimeCapitalization() {
+        val mp4 = Format(itag = 140, mimeType = "Audio/MP4; codecs=\"mp4a.40.2\"", bitrate = 128_000, url = "https://aac")
+        val webm = Format(itag = 251, mimeType = "Audio/WebM", bitrate = 128_000, url = "https://opus")
+        assertEquals(mp4, selectBestAudioFormat(listOf(webm, mp4), AudioQuality.MP4))
+        assertEquals(mp4, selectBestAudioFormat(listOf(webm.copy(bitrate = 1), mp4), AudioQuality.LOW))
+        assertEquals(webm, selectBestAudioFormat(listOf(mp4, webm), AudioQuality.AUTO))
+        assertEquals(webm, selectBestAudioFormat(listOf(mp4, webm), AudioQuality.HIGH))
+    }
+
+    @Test
     fun prefersStereoAndHigherSampleRate() {
         val formats =
             listOf(

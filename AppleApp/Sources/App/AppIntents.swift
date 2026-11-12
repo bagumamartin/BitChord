@@ -17,7 +17,27 @@ import Foundation
 /// performed during launch, before the first window has been made.
 @MainActor
 final class AppServices {
-    static let shared = AppServices()
+    static let shared: AppServices = {
+        // Before anything can create a JavaScript context. JavaScriptCore reads
+        // its options once, when the process's first VM is made.
+        tuneJavaScriptCore()
+        return AppServices()
+    }()
+
+    /// One garbage-collector marker for the in-process JavaScript engine.
+    ///
+    /// The only JavaScript this process runs is the stream cipher (pages and
+    /// sign-in run in WebKit's own processes). On a cold player that work
+    /// allocates heavily, and JavaScriptCore marks its heap with one helper per
+    /// core: five threads beside the script, past a whole core of CPU at a track
+    /// change. Measured on an allocation-heavy script, one marker did the same
+    /// work in 45% less CPU (2.8 s against 5.1 s), never above one core, for
+    /// about a fifth more wall time; the peak heap was the same. The script's
+    /// results are untouched: this only decides how many threads collect.
+    /// An explicit setting in the environment still wins.
+    nonisolated private static func tuneJavaScriptCore() {
+        setenv("JSC_numberOfGCMarkers", "1", 0)
+    }
 
     let controller = PlaybackController()
     let appModel = AppModel()

@@ -1,6 +1,7 @@
 package com.music.bitchord.data.innertube
 
 import com.music.bitchord.data.DebugLog
+import com.metrolist.innertubex.extraction.StreamResolveException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -82,7 +83,8 @@ object PlayerBridge {
                 callback.onResult(null, e.message ?: "This track cannot be played")
             } catch (e: Throwable) {
                 DebugLog.e("resolve failed for $videoId", e)
-                callback.onResult(null, e.message ?: e.toString())
+                callback.onResult(null, (e.message ?: e.toString()) +
+                    clientOutcomes(e, CleanVisionClient.declinedReason(videoId)))
             } finally { updateJobs { it - id } }
         }
         updateJobs { it + (id to job) }
@@ -102,6 +104,28 @@ object PlayerBridge {
 
     fun onPlaybackRefused(url: String, responseCode: Int) {
         StreamResolver.onPlaybackRefused(url, responseCode)
+    }
+
+    /** Separates the sentence Swift words for a listener from the per-client detail after it. */
+    const val CLIENTS_MARKER = "\n[clients]"
+
+    /**
+     * What each client YouTube was asked answered, for the Diagnostic Report.
+     *
+     * The extractor keeps these on its exception, but only the message used to
+     * cross to Swift, so a report from a listener whose every track failed said
+     * "No playable stream found" and nothing about which client refused or why.
+     * Client names and outcomes only: no URLs, user agents or account details.
+     */
+    internal fun clientOutcomes(error: Throwable, cleanDeclined: String? = null): String {
+        var cause: Throwable? = error
+        while (cause != null && cause !is StreamResolveException) cause = cause.cause
+        val diagnostics = (cause as? StreamResolveException)?.diagnostics
+        val outcomes = listOfNotNull(cleanDeclined?.let { "${CleanVisionClient.PROFILE}=$it" }) +
+            diagnostics?.attempts.orEmpty().map { "${it.clientName}=${it.outcome}" }
+        if (outcomes.isEmpty()) return ""
+        val page = if (diagnostics?.usedAuthenticatedWatchPage == true) " authenticatedPage" else ""
+        return CLIENTS_MARKER + page + " " + outcomes.joinToString()
     }
 
     fun interface DoneCallback { fun onDone() }

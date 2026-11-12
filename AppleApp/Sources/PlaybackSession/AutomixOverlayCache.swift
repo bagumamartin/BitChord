@@ -37,7 +37,13 @@ enum AutomixOverlayCache {
         return seedAutomixAnalysis(path: path, overlay: overlay)
     }
 
-    static func store(_ overlay: AutomixAnalysisOverlayRec, forFilePath path: String, expected: Fingerprint? = nil, directory: URL? = nil) {
+    static func store(
+        _ overlay: AutomixAnalysisOverlayRec,
+        rhythmAnalysed: Bool = true,
+        forFilePath path: String,
+        expected: Fingerprint? = nil,
+        directory: URL? = nil
+    ) {
         guard let url = cacheURL(forFilePath: path, directory: directory), let fingerprint = fingerprint(forFilePath: path),
               expected == nil || expected == fingerprint else { return }
         do {
@@ -46,7 +52,7 @@ enum AutomixOverlayCache {
                 withIntermediateDirectories: true
             )
             let data = try JSONEncoder().encode(Entry(version: 2, fingerprint: fingerprint,
-                systemVersion: ProcessInfo.processInfo.operatingSystemVersionString, overlay: CodableOverlay(overlay)))
+                systemVersion: ProcessInfo.processInfo.operatingSystemVersionString, overlay: CodableOverlay(overlay, rhythmAnalysed: rhythmAnalysed)))
             try data.write(to: url, options: .atomic)
         } catch {
             NSLog("[BitChord] overlay cache write failed: %@", String(describing: error))
@@ -61,6 +67,14 @@ enum AutomixOverlayCache {
               saved.version == 2, saved.fingerprint == fingerprint,
               saved.systemVersion == ProcessInfo.processInfo.operatingSystemVersionString
         else { return nil }
+        // The rhythm grid is wanted only without the Neural Engine beat model
+        // (see `MusicUnderstandingAnalyzer`). With it, a saved grid would
+        // replace the better one, so it is left out and the key kept; without
+        // it, an entry saved with no grid is analysed again to get one.
+        if AutomixModelLoader.hasNeuralEngineBeatModel {
+            return saved.overlay.withoutRhythm().asRec()
+        }
+        guard saved.overlay.rhythmAnalysed ?? true else { return nil }
         return saved.overlay.asRec()
     }
 
@@ -96,8 +110,12 @@ private struct CodableOverlay: Codable {
     var outroStart: Double?
     var mixInTime: Double?
     var source: String
+    /// Whether the rhythm pass was asked for. Absent in entries written before
+    /// it became optional, all of which asked for it.
+    var rhythmAnalysed: Bool?
 
-    init(_ rec: AutomixAnalysisOverlayRec) {
+    init(_ rec: AutomixAnalysisOverlayRec, rhythmAnalysed: Bool) {
+        self.rhythmAnalysed = rhythmAnalysed
         bpm = rec.bpm
         beatConfidence = rec.beatConfidence
         beatInterval = rec.beatInterval
@@ -112,6 +130,16 @@ private struct CodableOverlay: Codable {
         outroStart = rec.outroStart
         mixInTime = rec.mixInTime
         source = rec.source
+    }
+
+    func withoutRhythm() -> CodableOverlay {
+        var copy = self
+        copy.bpm = nil
+        copy.beatConfidence = nil
+        copy.beatInterval = nil
+        copy.beats = nil
+        copy.downbeats = nil
+        return copy
     }
 
     func asRec() -> AutomixAnalysisOverlayRec {

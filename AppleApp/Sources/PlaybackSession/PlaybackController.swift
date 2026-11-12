@@ -350,10 +350,10 @@ final class PlaybackController {
     var attemptedLyrics = false
     /// True while local audio analysis is filling in word timings.
     var lyricsAligning = false
-    /// True when the playing lyric's word timings were added by this app's
-    /// on-device alignment rather than arriving from the provider. Cleared on
+    /// How many of the playing lyric's untimed lines this app's on-device
+    /// alignment gave word timings to. Nil until a pass finishes; cleared on
     /// every new fetch; see `alignFetchedLyricsIfNeeded`.
-    var lyricsAlignedLocally = false
+    var lyricsAlignedLocally: LyricsAudioAligner.Coverage?
     var lyricsAlignmentState: LyricsAlignmentState = .idle
     /// Re-run a lookup that began before the decoder reported the real duration.
     @ObservationIgnored var lyricsNeedsDurationRefresh = false

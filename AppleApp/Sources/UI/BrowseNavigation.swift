@@ -146,6 +146,18 @@ final class MacNavigator: HistoryNavigating {
     struct Location: Equatable {
         var side: MacSide
         var path: [PushRoute]
+        /// The full player was showing over this location when a page was
+        /// opened from it, so arriving back here reopens the player.
+        var showedPlayer = false
+    }
+
+    /// Called when back arrives at a location the player was showing over.
+    var onReturnToPlayer: (() -> Void)?
+
+    /// Pushes a page opened from the player, with the player as the step back.
+    func pushFromPlayer(_ route: PushRoute) {
+        history[index].showedPlayer = true
+        visit(Location(side: current.side, path: current.path + [route]))
     }
 
     private(set) var history: [Location]
@@ -182,6 +194,13 @@ final class MacNavigator: HistoryNavigating {
     func goBack() {
         guard canGoBack else { return }
         index -= 1
+        if history[index].showedPlayer {
+            // Once: after the player is closed again, this location is an
+            // ordinary page, and walking back through it later should not
+            // pop the player up.
+            history[index].showedPlayer = false
+            onReturnToPlayer?()
+        }
     }
 
     func goForward() {

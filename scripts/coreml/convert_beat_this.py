@@ -140,6 +140,8 @@ def convert(args) -> None:
         original = {key: value.clone() for key, value in reference.items()}
 
     patched = common.patch_rmsnorm(model)
+    blocked = common.patch_attention(model)
+    print(f"attention blocked ({common.ATTENTION_BLOCK} query rows) in {blocked} modules", flush=True)
     with torch.no_grad():
         rewritten = model(example)
     parity = {}

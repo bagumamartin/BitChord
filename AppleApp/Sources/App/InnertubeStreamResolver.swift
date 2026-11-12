@@ -156,7 +156,9 @@ final class InnertubeStreamResolver: Sendable {
         }
 
         static func say(_ raw: String) -> String {
-            let said = raw.lowercased()
+            // Only the shared module's sentence decides the wording; the
+            // per-client outcomes after the marker are for the report.
+            let said = (raw.components(separatedBy: "\n[clients]").first ?? raw).lowercased()
             if said.contains("not a bot") && said.contains("even signed in") {
                 return botCheckAdvice(signedIn: true)
             }

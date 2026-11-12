@@ -10,13 +10,13 @@ shipping variant. Only this directory is touched by the conversion.
 |---|---|
 | Model code | [`CPJKU/beat_this`](https://github.com/CPJKU/beat_this) @ `ad7974846029835307ba19a3d5cefbf40b243041` (v1.1.0, MIT) |
 | Checkpoint | `final0.ckpt`, official CPJKU DAV URL, 81,058,141 B, SHA-256 `8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331` |
-| Conversion | torch 2.8.0 CPU, coremltools 9.0, `minimum_deployment_target=iOS18` (macOS 15) |
-| Output | int8 linear per-channel weight PTQ, 20,701,605 B |
+| Conversion | torch 2.13.0 CPU, coremltools 9.0, `minimum_deployment_target=iOS18` (macOS 15). The published v1/v2 archives were converted with torch 2.8.0; 2.13.0 produces the same weights and program, differing only in the recorded `torch==` version string |
+| Output | int8 linear per-channel weight PTQ, about 20.8 MB (v2 archive 18,826,124 B) |
 
 The model source is fetched into a cache at the pinned commit and patched by
 `convert_beat_this.py`; it is not vendored. `git` and Apple's `aa` must be on
-`PATH`. The run is byte-reproducible from a fresh Python 3.11 venv as well as
-the Python 3.9 environment used here. On Python 3.9 the script adds
+`PATH`. The run is byte-reproducible from a fresh Python 3.12 venv (torch 2.13
+needs Python 3.10 or later). On Python 3.9 the script adds
 `from __future__ import annotations` to the fetched package (upstream uses PEP
 604 annotations). Two additional in-process patches:
 
@@ -27,6 +27,16 @@ the Python 3.9 environment used here. On Python 3.9 the script adds
    `x * rsqrt(mean(x², -1) + 1e-24) * gamma`. 1e-24 is the mean-domain
    equivalent of F.normalize's 1e-12 norm clamp. The 25 `reduce_l2_norm` CPU
    ops become `reduce_mean` + `rsqrt` on the ANE.
+3. **Blocked attention** (since `model-beat-this-final0-coreml-v2`) — every
+   `Attend` computes `scaled_dot_product_attention` in 150-row query blocks
+   and concatenates them. Each query row's softmax only reads its own scores,
+   so this is the same algebra; the converter's fp32 parity gate covers it.
+   Whole-sequence attention kept every head's 1500×1500 score matrix live on
+   the Neural Engine, about 460 MB of device buffers that macOS charges to the
+   app. Blocked, a GUI test process is charged about 90 MB and a window
+   predicts in about 215 ms instead of 237 ms. Block sizes 100–150 measured
+   best; 50 and 500 cost more. v2 is 18,826,124 B, SHA-256 `cd00f20b…`; on
+   five real tracks its beat/downbeat peaks and BPM match v1 exactly.
 
 ## Run
 

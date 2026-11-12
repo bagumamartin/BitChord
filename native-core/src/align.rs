@@ -109,21 +109,18 @@ impl Alignment {
 
 /// Align two files. None when either cannot be decoded or is too short.
 pub fn align_files(song: &str, other: &str) -> Option<Alignment> {
-    // The two decodes are independent: side by side, the wait is the longer one.
-    let (a, b) = std::thread::scope(|scope| {
-        let other = scope.spawn(|| decode_mono(other));
-        (decode_mono(song), other.join().ok().flatten())
-    });
-    align(&a?, &b?)
+    // One after the other, on the caller's thread. Side by side they halved
+    // the wait, but put the alignment on two cores at once beside the
+    // transition planner; it runs ahead of any toggle, so the wait is unseen.
+    let a = decode_mono(song)?;
+    let b = decode_mono(other)?;
+    align(&a, &b)
 }
 
 /// Align two mono signals already at [`RATE`].
 pub fn align(song: &[f32], other: &[f32]) -> Option<Alignment> {
-    let ((song_chroma, song_onsets), (other_chroma, other_onsets)) = std::thread::scope(|scope| {
-        let theirs = scope.spawn(|| (chroma(other), onsets(other)));
-        let ours = (chroma(song), onsets(song));
-        (ours, theirs.join().expect("feature thread"))
-    });
+    let (song_chroma, song_onsets) = (chroma(song), onsets(song));
+    let (other_chroma, other_onsets) = (chroma(other), onsets(other));
     if song_chroma.len() < 20 || other_chroma.len() < 20 {
         return None;
     }
@@ -176,7 +173,7 @@ fn decode_mono(path: &str) -> Option<Vec<f32>> {
 /// One L2-normalised 12-bin pitch-class vector per frame; None for a frame
 /// with no tonal energy (silence reads as nothing, not as every key at once).
 fn chroma(signal: &[f32]) -> Vec<Option<[f32; 12]>> {
-    let window = hann(CHROMA_FFT);
+    let mut transform = Spectrum::new(CHROMA_FFT);
     let bins: Vec<Option<usize>> = (0..CHROMA_FFT / 2)
         .map(|k| {
             let hz = k as f64 * RATE / CHROMA_FFT as f64;
@@ -190,7 +187,7 @@ fn chroma(signal: &[f32]) -> Vec<Option<[f32; 12]>> {
     let mut frames = Vec::new();
     let mut start = 0;
     while start + CHROMA_FFT <= signal.len() {
-        let spectrum = magnitudes(&signal[start..start + CHROMA_FFT], &window);
+        let spectrum = transform.magnitudes(&signal[start..start + CHROMA_FFT]);
         let mut chroma = [0f32; 12];
         let mut energy = 0f64;
         for (k, magnitude) in spectrum.iter().enumerate() {
@@ -215,12 +212,12 @@ fn chroma(signal: &[f32]) -> Vec<Option<[f32; 12]>> {
 
 /// Positive spectral flux, one value per 10 ms.
 fn onsets(signal: &[f32]) -> Vec<f32> {
-    let window = hann(ONSET_FFT);
+    let mut transform = Spectrum::new(ONSET_FFT);
     let mut previous: Vec<f64> = vec![0.0; ONSET_FFT / 2];
     let mut envelope = Vec::new();
     let mut start = 0;
     while start + ONSET_FFT <= signal.len() {
-        let spectrum = magnitudes(&signal[start..start + ONSET_FFT], &window);
+        let spectrum = transform.magnitudes(&signal[start..start + ONSET_FFT]);
         let mut flux = 0f64;
         for (k, magnitude) in spectrum.iter().enumerate() {
             let compressed = (1.0 + 1000.0 * magnitude).ln();
@@ -454,19 +451,63 @@ fn hann(size: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Magnitudes of the first half of a windowed real frame's spectrum.
-fn magnitudes(frame: &[f32], window: &[f64]) -> Vec<f64> {
-    let size = frame.len();
-    let mut re: Vec<f64> = frame.iter().zip(window).map(|(s, w)| *s as f64 * w).collect();
-    let mut im = vec![0f64; size];
-    fft(&mut re, &mut im);
-    (0..size / 2)
-        .map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt() / size as f64)
-        .collect()
+/// A radix-2 FFT of one size with its twiddles computed once.
+///
+/// The butterflies used to call `sin_cos` for every pair: a five-minute pair of
+/// uploads ran about 150 million of them, the alignment's largest cost. Each
+/// stage's table holds exactly the values that call produced (same angle, same
+/// multiplication), so the spectra are bit-for-bit what they were. The frame
+/// buffers are kept too, so a frame allocates nothing.
+struct Spectrum {
+    size: usize,
+    window: Vec<f64>,
+    /// Stage after stage, `length / 2` (cos, sin) pairs for each `length`.
+    twiddles: Vec<(f64, f64)>,
+    re: Vec<f64>,
+    im: Vec<f64>,
+    magnitudes: Vec<f64>,
 }
 
-/// In-place radix-2 FFT (size a power of two).
-fn fft(re: &mut [f64], im: &mut [f64]) {
+impl Spectrum {
+    fn new(size: usize) -> Self {
+        let mut twiddles = Vec::with_capacity(size);
+        let mut length = 2;
+        while length <= size {
+            let angle = -2.0 * PI / length as f64;
+            for offset in 0..length / 2 {
+                let (sin, cos) = (angle * offset as f64).sin_cos();
+                twiddles.push((cos, sin));
+            }
+            length <<= 1;
+        }
+        Self {
+            size,
+            window: hann(size),
+            twiddles,
+            re: vec![0.0; size],
+            im: vec![0.0; size],
+            magnitudes: vec![0.0; size / 2],
+        }
+    }
+
+    /// Magnitudes of the first half of a windowed real frame's spectrum.
+    fn magnitudes(&mut self, frame: &[f32]) -> &[f64] {
+        let size = self.size;
+        debug_assert_eq!(frame.len(), size);
+        for ((re, sample), weight) in self.re.iter_mut().zip(frame).zip(&self.window) {
+            *re = *sample as f64 * weight;
+        }
+        self.im.fill(0.0);
+        fft(&mut self.re, &mut self.im, &self.twiddles);
+        for (k, out) in self.magnitudes.iter_mut().enumerate() {
+            *out = (self.re[k] * self.re[k] + self.im[k] * self.im[k]).sqrt() / size as f64;
+        }
+        &self.magnitudes
+    }
+}
+
+/// In-place radix-2 FFT (size a power of two) over [`Spectrum`]'s twiddles.
+fn fft(re: &mut [f64], im: &mut [f64], twiddles: &[(f64, f64)]) {
     let size = re.len();
     let mut swapped = 0usize;
     for index in 1..size {
@@ -482,13 +523,14 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
         }
     }
     let mut length = 2;
+    let mut stage = 0;
     while length <= size {
-        let angle = -2.0 * PI / length as f64;
+        let half = length / 2;
+        let table = &twiddles[stage..stage + half];
         for start in (0..size).step_by(length) {
-            for offset in 0..length / 2 {
-                let (sin, cos) = (angle * offset as f64).sin_cos();
+            for (offset, &(cos, sin)) in table.iter().enumerate() {
                 let a = start + offset;
-                let b = a + length / 2;
+                let b = a + half;
                 let (tr, ti) = (re[b] * cos - im[b] * sin, re[b] * sin + im[b] * cos);
                 re[b] = re[a] - tr;
                 im[b] = im[a] - ti;
@@ -496,6 +538,7 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
                 im[a] += ti;
             }
         }
+        stage += half;
         length <<= 1;
     }
 }
@@ -529,6 +572,64 @@ mod tests {
             start += chord_len;
         }
         out
+    }
+
+    /// The transform before twiddles were tabled: `sin_cos` in every butterfly.
+    fn reference_magnitudes(frame: &[f32]) -> Vec<f64> {
+        let size = frame.len();
+        let window = hann(size);
+        let mut re: Vec<f64> = frame.iter().zip(&window).map(|(s, w)| *s as f64 * w).collect();
+        let mut im = vec![0f64; size];
+        let mut swapped = 0usize;
+        for index in 1..size {
+            let mut bit = size >> 1;
+            while swapped & bit != 0 {
+                swapped ^= bit;
+                bit >>= 1;
+            }
+            swapped ^= bit;
+            if index < swapped {
+                re.swap(index, swapped);
+                im.swap(index, swapped);
+            }
+        }
+        let mut length = 2;
+        while length <= size {
+            let angle = -2.0 * PI / length as f64;
+            for start in (0..size).step_by(length) {
+                for offset in 0..length / 2 {
+                    let (sin, cos) = (angle * offset as f64).sin_cos();
+                    let a = start + offset;
+                    let b = a + length / 2;
+                    let (tr, ti) = (re[b] * cos - im[b] * sin, re[b] * sin + im[b] * cos);
+                    re[b] = re[a] - tr;
+                    im[b] = im[a] - ti;
+                    re[a] += tr;
+                    im[a] += ti;
+                }
+            }
+            length <<= 1;
+        }
+        (0..size / 2)
+            .map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt() / size as f64)
+            .collect()
+    }
+
+    #[test]
+    fn tabled_twiddles_give_the_same_spectrum_bit_for_bit() {
+        let signal = music(3.0, 7);
+        for size in [ONSET_FFT, CHROMA_FFT] {
+            let mut transform = Spectrum::new(size);
+            for start in (0..signal.len() - size).step_by(997) {
+                let frame = &signal[start..start + size];
+                let tabled = transform.magnitudes(frame).to_vec();
+                let reference = reference_magnitudes(frame);
+                assert!(
+                    tabled.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "size {size} frame at {start} differs"
+                );
+            }
+        }
     }
 
     fn at(seconds: f64) -> usize {

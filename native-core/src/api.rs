@@ -87,6 +87,7 @@ pub(super) fn plan_automix_impl_with_tier_and_phrase_bars(
     phrase_bars: u32,
 ) -> TransitionPlanRec {
     let _inference_budget = crate::analyzer::InferenceBudget::new(tier.inference_threads());
+    let _paced = crate::pace::Paced::arm(tier.analysis_duty());
     let skip_vocals = !tier.runs_vocal_model();
     let empty_headers = std::collections::HashMap::new();
     if skip_vocals {
@@ -385,9 +386,160 @@ fn decode_region_at_rate(
     })
 }
 
+/// Decode a stretch to mono and hand it to `sink` a chunk at a time, resampled
+/// to `target_rate` when that is lower than the source rate. Returns the rate
+/// the sink received and where the decode really began.
+fn stream_mono(
+    source: &str,
+    start_seconds: f64,
+    duration_seconds: f64,
+    headers: &std::collections::HashMap<String, String>,
+    target_rate: Option<u32>,
+    mut sink: impl FnMut(&[f32]) -> Result<(), String>,
+) -> Result<(u32, f64), String> {
+    if !duration_seconds.is_finite() || !start_seconds.is_finite() {
+        return Err("non-finite decode range".into());
+    }
+    let kind = crate::decode::SourceKind::parse(source);
+    let mut decoder = crate::decode::SymphoniaDecoder::open_available(&kind, headers)
+        .map_err(|e| e.to_string())?;
+    if start_seconds > 0.0 {
+        decoder.seek_seconds(start_seconds).map_err(|e| e.to_string())?;
+    }
+    let actual_start = decoder.position_seconds();
+    let rate = decoder.sample_rate();
+    let output_rate = target_rate.filter(|r| *r > 0).map_or(rate, |r| r.min(rate));
+    let mut resampler = (output_rate != rate)
+        .then(|| crate::decode::resampler::StreamResampler::new(rate, output_rate));
+    let want_frames = (duration_seconds.max(0.0) * rate as f64) as usize;
+    let mut read_frames = 0usize;
+    let mut mono: Vec<f32> = Vec::with_capacity(4096);
+    while read_frames < want_frames {
+        let chunk = decoder.read_stereo(4096).map_err(|e| e.to_string())?;
+        if chunk.is_empty() {
+            break;
+        }
+        let frames = (chunk.len() / 2).min(want_frames - read_frames);
+        read_frames += chunk.len() / 2;
+        mono.clear();
+        mono.extend(chunk.chunks_exact(2).take(frames).map(|pair| (pair[0] + pair[1]) * 0.5));
+        match resampler.as_mut() {
+            Some(resampler) => sink(&resampler.process(&mono))?,
+            None => sink(&mono)?,
+        }
+    }
+    if let Some(resampler) = resampler.as_mut() {
+        sink(&resampler.flush())?;
+    }
+    Ok((output_rate, actual_start))
+}
+
+/// Mono PCM as little-endian f32 bytes. Bytes cross the bridge as one copy;
+/// a `Vec<f32>` is read back one element at a time, which cost a whole core
+/// during analysis.
+pub(super) fn decode_region_pcm_impl(
+    source: &str,
+    start_seconds: f64,
+    duration_seconds: f64,
+    headers: &std::collections::HashMap<String, String>,
+    target_rate: Option<u32>,
+) -> Result<crate::records::DecodedPcm, String> {
+    // Only the lyrics feed asks for regions; it is background work.
+    let _paced = crate::pace::Paced::arm(Some(crate::pace::BACKGROUND_DUTY));
+    let mut pcm: Vec<u8> = Vec::new();
+    let (sample_rate, start) = stream_mono(
+        source, start_seconds, duration_seconds, headers, target_rate,
+        |samples| {
+            pcm.reserve(samples.len() * 4);
+            for sample in samples {
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+            Ok(())
+        },
+    )?;
+    Ok(crate::records::DecodedPcm { pcm, sample_rate, start_seconds: start })
+}
+
+/// Decode a whole track, in one pass, to a 16-bit mono WAV file at `dest`.
+/// Nothing but a 4096-frame chunk is held in memory and no sample crosses the
+/// bridge; the analysis frameworks read the file themselves.
+pub(super) fn write_analysis_wav_impl(
+    source: &str,
+    dest: &str,
+    headers: &std::collections::HashMap<String, String>,
+    max_seconds: f64,
+    target_rate: Option<u32>,
+) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+    // Only Music Understanding reads these files, in the background.
+    let _paced = crate::pace::Paced::arm(Some(crate::pace::BACKGROUND_DUTY));
+    let limit =if max_seconds.is_finite() && max_seconds > 0.0 { max_seconds } else { 4.0 * 3600.0 };
+    let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut out = std::io::BufWriter::with_capacity(256 * 1024, file);
+    out.write_all(&[0u8; 44]).map_err(|e| e.to_string())?;
+    let mut data_bytes: u64 = 0;
+    let mut bytes: Vec<u8> = Vec::with_capacity(8192);
+    let result = stream_mono(source, 0.0, limit, headers, target_rate, |samples| {
+        bytes.clear();
+        for sample in samples {
+            let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        data_bytes += bytes.len() as u64;
+        out.write_all(&bytes).map_err(|e| e.to_string())
+    });
+    let finish = |rate: u32, out: &mut std::io::BufWriter<std::fs::File>| -> Result<(), String> {
+        if data_bytes == 0 {
+            return Err("nothing decoded".into());
+        }
+        let data = u32::try_from(data_bytes).map_err(|_| "analysis file too large")?;
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + data).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        header.extend_from_slice(&1u16.to_le_bytes()); // mono
+        header.extend_from_slice(&rate.to_le_bytes());
+        header.extend_from_slice(&(rate * 2).to_le_bytes());
+        header.extend_from_slice(&2u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data.to_le_bytes());
+        out.flush().map_err(|e| e.to_string())?;
+        out.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        out.write_all(&header).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())
+    };
+    let outcome = result.and_then(|(rate, _)| finish(rate, &mut out));
+    if outcome.is_err() {
+        drop(out);
+        let _ = std::fs::remove_file(dest);
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod memory_tests {
     use super::*;
+
+    #[test]
+    fn analysis_wav_matches_the_region_decode() {
+        let dir = std::env::temp_dir().join(format!("bitchord-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("a.wav");
+        write_analysis_wav_impl(&fixture(), dest.to_str().unwrap(), &Default::default(), 0.0, None).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        assert_eq!(data + 44, bytes.len());
+        let region = decode_region_impl(&fixture(), 0.0, 3600.0, true).unwrap();
+        assert_eq!(data / 2, region.samples.len());
+        let pcm = decode_region_pcm_impl(&fixture(), 0.0, 1.0, &Default::default(), Some(16000)).unwrap();
+        assert_eq!(pcm.sample_rate, 16000);
+        assert!((pcm.pcm.len() / 4) as i64 - 16000 < 64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn fixture() -> String { format!("{}/tests/fixtures/seek-tone.m4a", env!("CARGO_MANIFEST_DIR")) }
 

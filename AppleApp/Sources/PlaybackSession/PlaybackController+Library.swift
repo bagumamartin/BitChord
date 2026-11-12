@@ -89,9 +89,8 @@ extension PlaybackController {
     ///
     /// Only while `state == .playing`, deliberately. Paused, buffering or
     /// seeking, the answer is exactly `position` — interpolation must never
-    /// invent motion the engine is not making. The `elapsed < 1` bound is the
-    /// same instinct for a stalled tick: past a second, the honest answer is the
-    /// last measurement rather than a guess with a second of drift in it.
+    /// invent motion the engine is not making. A stalled tick is answered by a
+    /// fresh engine reading rather than a long extrapolation.
     ///
     /// The listener's playback-rate setting is included; omitting it made every
     /// lyric drift steadily whenever playback was slower or faster than 1×. A
@@ -100,7 +99,12 @@ extension PlaybackController {
     func livePosition(at now: Date) -> Double {
         guard state == .playing else { return position }
         let elapsed = now.timeIntervalSince(positionSampledAt)
-        guard elapsed > 0, elapsed < 1 else { return position }
+        guard elapsed > 0 else { return position }
+        // A late tick (main thread busy during a transition burst) used to
+        // freeze this at the last sample, which the video sync read as the
+        // picture running ~1 s ahead and seeked it backwards. Past one poll
+        // interval, ask the engine instead of extrapolating or freezing.
+        guard elapsed < 0.4 else { return playbackPosition }
         return position + elapsed * playbackRate
     }
 

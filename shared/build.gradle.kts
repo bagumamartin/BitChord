@@ -31,18 +31,18 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(project(":innertubex"))
-            implementation("io.ktor:ktor-client-core:3.5.2")
-            implementation("io.ktor:ktor-client-content-negotiation:3.5.2")
-            implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.2")
+            implementation("io.ktor:ktor-client-core:3.6.0")
+            implementation("io.ktor:ktor-client-content-negotiation:3.6.0")
+            implementation("io.ktor:ktor-serialization-kotlinx-json:3.6.0")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
             implementation("com.rickclephas.kmp:kmp-nativecoroutines-core:1.0.5")
             // sqldelight: add only if upstream Room usage is confirmed (spec §1.1).
         }
 
         commonTest.dependencies {
             implementation(kotlin("test"))
-            implementation("io.ktor:ktor-client-mock:3.5.2")
+            implementation("io.ktor:ktor-client-mock:3.6.0")
             // For `runTest` only. Kotlin/Native's `kotlin.test` refuses a `suspend`
             // test function outright, and a `@Test` that blocks the test thread
             // instead is how a suspended read deadlocks in CI rather than in a
@@ -53,7 +53,7 @@ kotlin {
         // The Darwin Ktor engine only resolves for Apple targets, so it lives in
         // appleMain — the common ancestor of every configured Apple target.
         appleMain.dependencies {
-            implementation("io.ktor:ktor-client-darwin:3.5.2")
+            implementation("io.ktor:ktor-client-darwin:3.6.0")
             // The party socket is NSURLSessionWebSocketTask, not Ktor: Ktor 3.2's
             // client websockets plugin is an empty shell on Darwin, and the platform
             // API is both shorter and gives the close code and ping/pong this

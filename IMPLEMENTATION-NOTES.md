@@ -46,10 +46,16 @@ Implemented November 11, 2026, with six concurrent GPT-6 Luna workers at high re
 
 - Full macOS Debug app build: passed.
 - Full iPhone/iPad Simulator Debug app build: passed.
-- Kotlin/Native macOS suites: 997 shared tests and 260 extractor tests passed, zero failures.
+- Kotlin/Native macOS suites: 1,017 shared tests and 552 extractor tests passed, zero failures.
 - Standalone queue suite: 116 checks plus source contracts passed.
 - Playlist import, lyrics-state/locale, offline/cache/resume/retry, folder-scope, settings/audio, release and settings-parity checks: passed.
 - Interactive isolated Mac app: verified Search navigation, search results with rating indicators, queue action menu and confirmation, queue panel and title filtering. The temporary app used the debug validation identity; no account sign-in or rating change was performed.
 - Mac controller/runtime suite: 38 checks passed, including quality changes at the current position and offline transitions.
 
 Build caches and generated frameworks/projects remain local ignored artifacts. The existing installed application was not replaced.
+
+## Upstream integration
+
+Merged upstream 1.0.8 (`9c20ef3`) and resolved all eight conflicts, retaining its stream recovery, audio performance work, whole-song/multilingual lyric alignment and regression tests alongside this PR's quality caps, statuses and cache handling. Alignment cache coverage now uses the same eligible-line predicate as fresh alignment.
+
+Merged-build validation: macOS and iOS Simulator Debug builds passed; 1,017 shared and 552 extractor native tests passed. The 38-check Mac runtime suite passed an isolated rerun with engine logging confirming a quality reload opened at 6.001 seconds. Its first run failed the playing-quality position assertion; this intermittent runtime observation remains noted for review. Three screenshots from the merged Mac build are included under `.github/pr-assets/music-ux-quality/`.

@@ -6,10 +6,333 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SabrCoreTest {
+    @Test
+    fun repeatedEmbeddedMessagesMergeSuppliedFields() {
+        val header =
+            ProtoWriter()
+                .apply {
+                    int32(1, 1)
+                    message(13) { int32(1, 140) }
+                    message(13) {
+                        int64(2, 100)
+                        string(3, "x")
+                    }
+                    message(15) { int64(1, 48_000) }
+                    message(15) { int64(2, 96_000) }
+                    message(15) { int32(3, 48_000) }
+                }.toByteArray()
+        val decoded = SabrProtoCodec.decodeMediaHeader(header)
+        assertEquals(SabrFormatId(140, 100, "x"), decoded.formatId)
+        assertEquals(1_000L, decoded.startMs)
+        assertEquals(2_000L, decoded.durationMs)
+        val resetStart = header + ProtoWriter().apply { message(15) { int64(1, 0) } }.toByteArray()
+        assertEquals(0L, SabrProtoCodec.decodeMediaHeader(resetStart).startMs)
+        assertEquals(2_000L, SabrProtoCodec.decodeMediaHeader(resetStart).durationMs)
+        val initialization =
+            ProtoWriter()
+                .apply {
+                    message(2) {
+                        int32(1, 140)
+                        int64(2, 100)
+                    }
+                    message(2) {
+                        int64(2, 0)
+                        string(3, "")
+                    }
+                }.toByteArray()
+        assertEquals(SabrFormatId(140, 0, ""), SabrProtoCodec.decodeFormatInitialization(initialization)?.formatId)
+    }
+
+    @Test
+    fun redirectUsesLastUrlOccurrence() {
+        val data =
+            ProtoWriter()
+                .apply {
+                    string(1, "https://a.googlevideo.com/videoplayback")
+                    string(1, "https://b.googlevideo.com/videoplayback")
+                }.toByteArray()
+        assertEquals("https://b.googlevideo.com/videoplayback", SabrProtoCodec.decodeRedirect(data))
+    }
+
+    @Test
+    fun terminalProtectionIgnoresMalformedTailAtEveryReadBoundary() {
+        val bytes = byteArrayOf(0x3a, 2, 8, 3, 0x15, 0)
+        for (split in 0..bytes.size) {
+            val processor = SabrUmpProcessor()
+            val events = processor.feed(bytes.copyOfRange(0, split)) + processor.feed(bytes.copyOfRange(split, bytes.size))
+            assertEquals(listOf(SabrEvent.StreamProtectionStatus(3, -1)), events)
+        }
+    }
+
+    @Test
+    fun bootstrapRejectsBlankVideoIdentity() {
+        for (id in listOf("", " ")) {
+            val response = bootstrapPlayerResponse().copy(videoDetails = PlayerResponse.VideoDetails(videoId = id, lengthSeconds = "60"))
+            assertFalse(response.hasSabrBootstrapPrerequisites())
+            assertFailsWith<IllegalArgumentException> { response.toSabrBootstrap(3, "1", bootstrapAudioFormat()) }
+        }
+    }
+
+    @Test
+    fun reusedWritersPreserveNestedLengthsAndPreviouslyEncodedRequests() {
+        val writer = ProtoWriter()
+        for (size in listOf(127, 128, 16_383, 16_384, 1, 0)) {
+            val payload = ByteArray(size) { it.toByte() }
+            writer.reset()
+            writer.message(1) {
+                message(2) { bytes(3, payload) }
+                message(4) { int32(5, 42) }
+            }
+            writer.packedInt32(6, listOf(1, 128))
+            val encoded = writer.toByteArray()
+            val first = protobufBytesField(encoded, 1)
+            assertContentEquals(payload, protobufBytesField(protobufBytesField(first, 2), 3))
+            assertEquals(42, protobufIntField(protobufBytesField(first, 4), 5))
+            assertContentEquals(byteArrayOf(1, 0x80.toByte(), 1), protobufBytesField(encoded, 6))
+        }
+        val bootstrap = bootstrapPlayerResponse().toSabrBootstrap(3, "1", bootstrapAudioFormat())
+
+        fun request(
+            time: Long,
+            reuse: ProtoWriter,
+        ): ByteArray =
+            SabrProtoCodec.encodeRequest(
+                bootstrap,
+                time,
+                time > 0,
+                emptyList(),
+                null,
+                emptyList(),
+                writer = reuse,
+            )
+        val first = request(0, writer)
+        val snapshot = first.copyOf()
+        assertContentEquals(request(123, ProtoWriter()), request(123, writer))
+        assertContentEquals(snapshot, first)
+        assertContentEquals(snapshot, request(0, writer))
+    }
+
+    @Test
+    fun processorCoalescesTinyUnknownLengthFragmentsIntoOneBuffer() {
+        val processor = SabrUmpProcessor(maxCollectedSegmentSize = 100_000, maxPendingMediaBytes = 200_000)
+        processor.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)))
+        repeat(100_000) { index ->
+            processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, index.toByte())))
+            assertEquals(1, processor.retainedMediaBufferCount)
+        }
+        val segment =
+            processor
+                .feed(umpPart(UmpPartType.MEDIA_END, byteArrayOf(1)))
+                .filterIsInstance<SabrEvent.Segment>()
+                .single()
+                .segment
+        processor.finish()
+        assertContentEquals(ByteArray(100_000) { it.toByte() }, segment.data)
+        assertEquals(0, processor.retainedMediaBufferCount)
+    }
+
+    @Test
+    fun processorAccountsForCapacityAndTransientGrowthCopies() {
+        val processor = SabrUmpProcessor(maxCollectedSegmentSize = 16_384, maxPendingMediaBytes = 8_192)
+        processor.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)))
+        processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1) + ByteArray(4_096)))
+        val error =
+            assertFailsWith<SabrProtocolException> {
+                processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, 1)))
+            }
+        assertEquals("SABR pending media exceeded 8192 bytes", error.message)
+    }
+
+    @Test
+    fun processorAccountsForFinalCompactionAndReleasesCapacity() {
+        val tight = SabrUmpProcessor(maxPendingMediaBytes = 4_096)
+        tight.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)))
+        tight.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, 7)))
+        assertFailsWith<SabrProtocolException> { tight.feed(umpPart(UmpPartType.MEDIA_END, byteArrayOf(1))) }
+
+        val processor = SabrUmpProcessor(maxPendingMediaBytes = 4_097)
+        repeat(3) {
+            processor.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)))
+            processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, 7)))
+            val segment =
+                processor
+                    .feed(umpPart(UmpPartType.MEDIA_END, byteArrayOf(1)))
+                    .filterIsInstance<SabrEvent.Segment>()
+                    .single()
+                    .segment
+            assertContentEquals(byteArrayOf(7), segment.data)
+        }
+        processor.finish()
+    }
+
+    @Test
+    fun processorRejectsUnknownLengthSegmentBeyondPayloadLimit() {
+        val processor = SabrUmpProcessor(maxCollectedSegmentSize = 4)
+        processor.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)))
+        processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, 1, 2, 3, 4)))
+        assertFailsWith<SabrProtocolException> { processor.feed(umpPart(UmpPartType.MEDIA, byteArrayOf(1, 5))) }
+    }
+
+    @Test
+    fun tickConversionAcceptsBoundaryAndRejectsFractionalOverflow() {
+        fun initialization(
+            ticks: Long,
+            timescale: Int,
+        ): Long? =
+            SabrProtoCodec
+                .decodeFormatInitialization(
+                    ProtoWriter()
+                        .apply {
+                            message(2) { int32(1, 140) }
+                            int64(9, ticks)
+                            int32(10, timescale)
+                        }.toByteArray(),
+                )?.durationMs
+
+        fun mediaRange(
+            ticks: Long,
+            timescale: Int,
+            field: Int,
+        ): Long {
+            val header =
+                SabrProtoCodec.decodeMediaHeader(
+                    ProtoWriter()
+                        .apply {
+                            int32(3, 140)
+                            message(15) {
+                                int64(field, ticks)
+                                int32(3, timescale)
+                            }
+                        }.toByteArray(),
+                )
+            return if (field == 1) header.startMs else header.durationMs
+        }
+
+        assertEquals(Long.MAX_VALUE, initialization(Long.MAX_VALUE, 1_000))
+        assertEquals(Long.MAX_VALUE - 7, initialization(92_233_720_368_547_758, 10))
+        assertFailsWith<SabrProtocolException> { initialization(92_233_720_368_547_759, 10) }
+        for (field in listOf(1, 2)) {
+            assertEquals(Long.MAX_VALUE, mediaRange(Long.MAX_VALUE, 1_000, field))
+            assertEquals(Long.MAX_VALUE - 7, mediaRange(92_233_720_368_547_758, 10, field))
+            assertFailsWith<SabrProtocolException> { mediaRange(92_233_720_368_547_759, 10, field) }
+        }
+    }
+
+    @Test
+    fun controlValueLimitsAreCheckedBeforeCopyingFields() {
+        for (size in listOf(65_536, 65_537)) {
+            val value = ByteArray(size) { 7 }
+            val context = ProtoWriter().apply { bytes(3, value) }.toByteArray()
+            val policy = ProtoWriter().apply { bytes(7, value) }.toByteArray()
+            if (size == 65_536) {
+                assertContentEquals(value, SabrProtoCodec.decodeContextUpdate(context)?.value)
+                assertContentEquals(value, SabrProtoCodec.decodeNextRequestPolicy(policy).playbackCookie)
+            } else {
+                // The length prefix alone must trigger the limit before reading or allocating the payload.
+                for (payload in listOf(context, policy)) {
+                    val error =
+                        assertFailsWith<SabrProtocolException> {
+                            if (payload === context) {
+                                SabrProtoCodec.decodeContextUpdate(payload, to = 4)
+                            } else {
+                                SabrProtoCodec.decodeNextRequestPolicy(payload, to = 4)
+                            }
+                        }
+                    assertEquals("Protobuf field exceeded 65536 bytes", error.message)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun processorRejectsOversizedControlPartsBeforeDecoding() {
+        for (type in listOf(UmpPartType.SABR_CONTEXT_UPDATE, UmpPartType.NEXT_REQUEST_POLICY)) {
+            val error =
+                assertFailsWith<SabrProtocolException> {
+                    // Only the framing header is present: reject before buffering the declared payload.
+                    SabrUmpProcessor().feed(umpVarint(type) + umpVarint(128 * 1024 + 1))
+                }
+            assertEquals("UMP part is too large: 131073 bytes", error.message)
+        }
+    }
+
+    @Test
+    fun protobufSlicesRespectBoundariesAndOwnRetainedBytes() {
+        val payload = ProtoWriter().apply { bytes(7, byteArrayOf(1, 2, 3)) }.toByteArray()
+        val padded = byteArrayOf(0) + payload + byteArrayOf(0)
+        val policy = SabrProtoCodec.decodeNextRequestPolicy(padded, 1, padded.lastIndex)
+        padded.fill(0)
+        assertContentEquals(byteArrayOf(1, 2, 3), policy.playbackCookie)
+        assertFailsWith<SabrProtocolException> {
+            SabrProtoCodec.decodeNextRequestPolicy(payload, to = payload.lastIndex)
+        }
+        assertFailsWith<SabrProtocolException> { ProtoReader(byteArrayOf(0x80.toByte(), 1), 0, 1).varint() }
+        val skipped = ProtoReader(byteArrayOf(0x0a, 1, 0), 0, 2)
+        assertFailsWith<SabrProtocolException> { skipped.skip(skipped.tag()) }
+        assertFailsWith<IllegalArgumentException> { ProtoReader(payload, -1) }
+        assertFailsWith<IllegalArgumentException> { ProtoReader(payload, 2, 1) }
+    }
+
+    @Test
+    fun processorBoundsHeaderObjectsEvenForDiscardedEmptySegments() {
+        val processor = SabrUmpProcessor(shouldCollectMedia = { false })
+        val response =
+            umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0)) +
+                umpPart(UmpPartType.MEDIA_END, byteArrayOf(1))
+        repeat(4_096) { processor.feed(response) }
+        val error = assertFailsWith<SabrProtocolException> { processor.feed(response) }
+        assertEquals("SABR response exceeded the media header limit", error.message)
+    }
+
+    @Test
+    fun processorRejectsEmptySelectedInitializationAndMedia() {
+        for (isInit in listOf(false, true)) {
+            val processor = SabrUmpProcessor()
+            processor.feed(umpPart(UmpPartType.MEDIA_HEADER, mediaHeader(contentLength = 0, isInit = isInit)))
+            val error =
+                assertFailsWith<SabrProtocolException> {
+                    processor.feed(umpPart(UmpPartType.MEDIA_END, byteArrayOf(1)))
+                }
+            assertEquals("Empty selected SABR media segment", error.message)
+        }
+    }
+
+    @Test
+    fun sensitiveSabrModelsRedactUrlsAndTokenBytes() {
+        val redactionFixture = "synthetic-sabr-secret"
+        val url = "https://example.googlevideo.com/videoplayback?sig=$redactionFixture"
+        val token = byteArrayOf(91, 82, 73)
+        val bootstrap =
+            bootstrapPlayerResponse()
+                .toSabrBootstrap(
+                    clientId = 3,
+                    clientVersion = "1",
+                    audioFormat = bootstrapAudioFormat(),
+                ).copy(serverAbrStreamingUrl = url, poToken = token, videoPlaybackUstreamerConfig = token)
+        val context = SabrContext(1, token, true, 0)
+        val models =
+            listOf(
+                bootstrap,
+                context,
+                SabrEvent.ContextUpdate(context),
+                SabrEvent.Redirect(url),
+                SabrEvent.NextRequestPolicy(1, 2, 3, 4, token),
+            )
+        for (model in models) {
+            val description = model.toString()
+            assertTrue(redactionFixture !in description)
+            assertTrue("googlevideo" !in description)
+            assertTrue(token.contentToString() !in description)
+        }
+        assertTrue("audioItag=140" in bootstrap.toString())
+        assertTrue("poTokenSize=3" in bootstrap.toString())
+    }
+
     @Test
     fun chunkRejectsOverflowedByteRange() {
         val chunk =
@@ -73,6 +396,58 @@ class SabrCoreTest {
 
         assertEquals("https://m.youtube.com", bootstrap.requestOrigin)
         assertEquals(bootstrap.requestOrigin, sabrRequestOrigin(YouTubeClient.MWEB_SABR.clientName))
+    }
+
+    @Test
+    fun videoBootstrapListsOneVariantPerHeightAndRetargetsVideoOnly() {
+        fun video(
+            itag: Int,
+            height: Int,
+            bitrate: Int,
+            lastModified: String? = "200",
+        ) = PlayerResponse.StreamingData.Format(
+            itag = itag,
+            mimeType = "video/mp4",
+            bitrate = bitrate,
+            width = height * 16 / 9,
+            height = height,
+            lastModified = lastModified,
+        )
+        val selected = video(136, 720, 1_000_000)
+        val base = bootstrapPlayerResponse()
+        val streaming = checkNotNull(base.streamingData)
+        val response =
+            base.copy(
+                streamingData =
+                    streaming.copy(
+                        adaptiveFormats =
+                            streaming.adaptiveFormats +
+                                listOf(
+                                    selected,
+                                    video(247, 720, 1_500_000),
+                                    video(137, 1080, 2_500_000).copy(averageBitrate = 1_800_000),
+                                    video(135, 480, 500_000, null),
+                                ),
+                    ),
+            )
+
+        val bootstrap =
+            response.toSabrBootstrap(
+                clientId = 3,
+                clientVersion = "1",
+                audioFormat = bootstrapAudioFormat(),
+                videoFormat = selected,
+            )
+
+        assertEquals(listOf(144 to 160, 720 to 136, 1080 to 137), bootstrap.videoVariants.map { it.height to it.format.itag })
+        val retargeted = bootstrap.withVideoVariant(bootstrap.videoVariants.last())
+        assertEquals(137, retargeted.selectedVideoFormat?.itag)
+        assertEquals(1080, retargeted.selectedVideoHeight)
+        assertEquals(1_800_000, retargeted.selectedVideoBitrate)
+        assertEquals(bootstrap.audioFormat, retargeted.audioFormat)
+        assertTrue(bootstrap.videoPlaybackUstreamerConfig.contentEquals(retargeted.videoPlaybackUstreamerConfig))
+        assertFailsWith<IllegalArgumentException> { bootstrap.withVideoVariant(bootstrap.videoVariants.last().copy(height = 2160)) }
+        assertTrue(base.toSabrBootstrap(clientId = 3, clientVersion = "1", audioFormat = bootstrapAudioFormat()).videoVariants.isEmpty())
     }
 
     @Test

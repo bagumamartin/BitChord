@@ -129,6 +129,10 @@ actor YouTubePlayerJs {
     }
 
     private func loadText(request: URLRequest) async throws -> String {
+        // No cookie jar: YouTube's identity cookies would otherwise settle in
+        // the process-wide store and tie every later page to one visitor.
+        var request = request
+        request.httpShouldHandleCookies = false
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let url = http.url, url.scheme == "https", url.host == "www.youtube.com",

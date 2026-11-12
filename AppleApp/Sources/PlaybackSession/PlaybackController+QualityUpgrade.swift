@@ -356,21 +356,25 @@ extension PlaybackController {
             return
         }
         let fade = Double(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
-        let plan = engine.planAutomix(
-            outgoingPath: outgoing,
-            incomingPath: path,
-            outgoingText: outgoingText,
-            incomingText: incomingText,
-            albumSequential: album,
-            crossfadeSeconds: fade,
-            outgoingDurationSeconds: outgoingDuration,
-            incomingDurationSeconds: entry.durationSeconds > 0
-                ? entry.durationSeconds : Double(stream.durationSec ?? 0),
-            outgoingHeaders: outgoingHeaders,
-            // The queued replacement is a local file by this point.
-            incomingHeaders: [:],
-            allowEffects: self.pacing.allowsEffect(for: TransitionPair(outgoing: outgoingId, incoming: mediaId))
-        )
+        let incomingDuration = entry.durationSeconds > 0
+            ? entry.durationSeconds : Double(stream.durationSec ?? 0)
+        let allowEffects = self.pacing.allowsEffect(for: TransitionPair(outgoing: outgoingId, incoming: mediaId))
+        let plan = await AnalysisTurns.take {
+            engine.planAutomix(
+                outgoingPath: outgoing,
+                incomingPath: path,
+                outgoingText: outgoingText,
+                incomingText: incomingText,
+                albumSequential: album,
+                crossfadeSeconds: fade,
+                outgoingDurationSeconds: outgoingDuration,
+                incomingDurationSeconds: incomingDuration,
+                outgoingHeaders: outgoingHeaders,
+                // The queued replacement is a local file by this point.
+                incomingHeaders: [:],
+                allowEffects: allowEffects
+            )
+        }
         let target = await MainActor.run { () -> (PlaybackLoadSubmissionGate, UInt64)? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId,
                   self.loadedSourcePath == outgoing else { return nil }

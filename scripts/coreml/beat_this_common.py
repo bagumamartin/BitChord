@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 SOURCE_REPO = "https://github.com/CPJKU/beat_this.git"
 # v1.1.0 (the version the app's export was built from); pinned by commit, not tag.
@@ -197,6 +198,46 @@ def _rmsnorm_forward(self, x):
     return x * torch.rsqrt(mean_square + 1e-24) * self.gamma
 
 
+# Query rows per attention block. 1500 / 150 = 10 blocks for the time
+# attention; shorter sequences (the frontend's frequency attention) are one.
+ATTENTION_BLOCK = 150
+
+
+def patch_attention(model: nn.Module, block: int = ATTENTION_BLOCK) -> int:
+    """Compute attention in blocks of query rows.
+
+    Each query row's softmax only reads its own scores, so splitting the
+    queries and concatenating the results is the same algebra. On the Neural
+    Engine it is not the same memory: the whole-sequence form keeps every
+    head's 1500x1500 score matrix live, about 450 MB of device buffers per
+    loaded model, which macOS charges to the app. In 150-row blocks the
+    measured cost is about 120 MB, and each window predicts slightly faster.
+    """
+    count = 0
+    for module in model.modules():
+        if module.__class__.__name__ == "Attend":
+            module.forward = _blocked_attend.__get__(module, type(module))
+            module.attention_block = block
+            count += 1
+    return count
+
+
+def _blocked_attend(self, q, k, v):
+    if self.scale is not None:
+        q = q * (self.scale / (q.shape[-1] ** -0.5))
+    block = self.attention_block
+    rows = q.shape[-2]
+    if rows <= block:
+        return F.scaled_dot_product_attention(q, k, v)
+    return torch.cat(
+        [
+            F.scaled_dot_product_attention(q[..., start : start + block, :], k, v)
+            for start in range(0, rows, block)
+        ],
+        dim=-2,
+    )
+
+
 class BeatThisWrapper(nn.Module):
     """Stable Core ML output names: beat and downbeat."""
 
@@ -216,6 +257,7 @@ def load_patched_model(checkpoint: Path, cache_dir: Path, patch_rms: bool = True
     disable_rotary_cache(model)
     if patch_rms:
         patch_rmsnorm(model)
+        patch_attention(model)
     return model
 
 

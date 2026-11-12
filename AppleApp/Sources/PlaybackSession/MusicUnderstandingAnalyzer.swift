@@ -76,10 +76,23 @@ enum MusicUnderstandingAnalyzer {
         return false
     }
 
+    /// Writes a track the app's own decoder reads to a PCM file AVFoundation
+    /// opens; false on failure.
+    typealias Decode = PCMTranscode.Writer
+
     /// Analyze a local file and seed the native Automix overlay cache.
     /// Returns true when an overlay was seeded.
+    ///
+    /// `decode` is how a file AVFoundation cannot open still gets analysed:
+    /// streamed tracks are cached as WebM/Opus, which `AVURLAsset` rejects
+    /// (`invalidAsset`), so those are decoded natively and handed over as a
+    /// temporary PCM file.
     @discardableResult
-    static func analyzeAndSeed(filePath: String, allowAccelerator: Bool = true) async -> Bool {
+    static func analyzeAndSeed(
+        filePath: String,
+        allowAccelerator: Bool = true,
+        decode: Decode? = nil
+    ) async -> Bool {
         #if DEBUG
         // Isolate native timer/mixer validation from the system GPU models.
         // A device run exposed a StructuralFeaturesModel MPS assertion on the
@@ -114,7 +127,7 @@ enum MusicUnderstandingAnalyzer {
             let key = "\(path)|\(fingerprint.size)|\(fingerprint.modified)"
             if await MusicAnalysisQueue.shared.perform(key: key, operation: {
                 if AutomixOverlayCache.seedCached(forFilePath: path) { return true }
-                return await analyzeAvailable(path: path)
+                return await analyzeAvailable(path: path, decode: decode)
             }) {
                 return true
             }
@@ -134,7 +147,7 @@ enum MusicUnderstandingAnalyzer {
     }
 
     @available(iOS 27.0, macOS 27.0, tvOS 27.0, watchOS 27.0, visionOS 27.0, *)
-    private static func analyzeAvailable(path: String) async -> Bool {
+    private static func analyzeAvailable(path: String, decode: Decode?) async -> Bool {
         #if canImport(MusicUnderstanding)
         // Synchronous pre-check before the MainActor hop below narrows the
         // race further: a backgrounding that landed between the caller's check
@@ -142,9 +155,22 @@ enum MusicUnderstandingAnalyzer {
         guard !isGpuSuspended() else { return false }
         // Re-check right before GPU work — the first await can race a lock.
         guard await isForeground() else { return false }
+        var transcoded: URL?
+        defer { if let transcoded { try? FileManager.default.removeItem(at: transcoded) } }
         do {
             guard let fingerprint = AutomixOverlayCache.fingerprint(forFilePath: path) else { return false }
-            let url = URL(fileURLWithPath: path)
+            var url = URL(fileURLWithPath: path)
+            if !AVFoundationReadable.canOpen(path) {
+                guard let decode, let pcm = await Task.detached(priority: .utility, operation: {
+                    PCMTranscode.write(path: path, writer: decode)
+                }).value else {
+                    NSLog("[BitChord] Music Understanding: could not decode %@", path)
+                    return false
+                }
+                transcoded = pcm
+                url = pcm
+            }
+            guard !Task.isCancelled else { return false }
             let asset = AVURLAsset(
                 url: url,
                 options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
@@ -153,10 +179,24 @@ enum MusicUnderstandingAnalyzer {
             guard !Task.isCancelled, !isGpuSuspended(), await isForeground() else { await session.cancel(); return false }
             // Omit `.instrumentActivity` — its MPS graph aborts the process.
             // Omit `.pace` for the same Metal family until Apple stabilizes it.
+            let wantsRhythm = !AutomixModelLoader.hasNeuralEngineBeatModel
             let result: MusicUnderstandingSession.SessionResult
             do {
                 result = try await withTaskCancellationHandler {
-                    try await session.analyze(for: [.rhythm, .key, .structure, .loudness])
+                    // `.structure` is left out on purpose: measured on a
+                    // four-minute track its model holds about 270 MB resident
+                    // in this process after the session is over (rhythm and
+                    // key together hold about 90 MB), and the native DSP pass
+                    // already produces sections, phrases and the mix points.
+                    //
+                    // Key is always worth having: it agreed with the native
+                    // key detector on only about a third of 40 cached tracks,
+                    // the rest a fifth or the relative key away, and it costs
+                    // about 1.2 s of CPU. Rhythm runs only when the Neural
+                    // Engine beat model is not loaded: it cost about 5 s of
+                    // CPU per track, and its grid is a fixed tempo at a
+                    // rounded BPM where Beat This! follows the beats.
+                    try await session.analyze(for: wantsRhythm ? [.rhythm, .key] : [.key])
                 } onCancel: {
                     Task { await session.cancel() }
                 }
@@ -166,7 +206,8 @@ enum MusicUnderstandingAnalyzer {
             }
             guard !Task.isCancelled, !isGpuSuspended(), fingerprint == AutomixOverlayCache.fingerprint(forFilePath: path) else { await session.cancel(); return false }
             let overlay = overlay(from: result)
-            AutomixOverlayCache.store(overlay, forFilePath: path, expected: fingerprint)
+            AutomixOverlayCache.store(overlay, rhythmAnalysed: wantsRhythm, forFilePath: path, expected: fingerprint)
+            MemoryRelief.soon()
             return seedAutomixAnalysis(path: path, overlay: overlay)
         } catch {
             guard !Task.isCancelled else { return false }

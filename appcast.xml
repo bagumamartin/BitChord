@@ -9,6 +9,57 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.8</title>
+            <pubDate>Thu, 12 Nov 2026 08:16:43 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.8</sparkle:fullReleaseNotesLink>
+            <sparkle:version>17</sparkle:version>
+            <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.8
+
+## Playback
+
+- Fixes "Couldn't open a stream for that track" and "confirm you're not a bot" on networks where other YouTube clients still play. BitChord kept presenting the same YouTube identity once it had been flagged, so no retry, network or account could clear it. Each track is now asked for with a fresh anonymous identity, the way the working clients ask, and YouTube cookies are no longer stored.
+- The YouTube extractor is updated to InnerTubeX 0.11.6.
+- A track that fails is no longer asked for again in quick bursts, which could make a flagged network worse.
+- Diagnostic reports now say which YouTube client refused a track and why.
+
+## Security
+
+- rustls 0.23.46.
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.8/BitChord-1.0.8-build17-mac-arm64.dmg" length="19492298" type="application/octet-stream" sparkle:edSignature="N11U6bN8NZfR29kg6oyIJYhMfWsndiVugMhBtDSFAMlzp+PifTqogvq9Aq3Bf+tddyey5/UNjKQhowjQw5cVCA=="/>
+        </item>
+        <item>
+            <title>1.0.7</title>
+            <pubDate>Wed, 11 Nov 2026 23:36:13 +0000</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.7</sparkle:fullReleaseNotesLink>
+            <sparkle:version>16</sparkle:version>
+            <sparkle:shortVersionString>1.0.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.7
+
+## Automix
+
+- Transitions are calmer on the CPU. Track analysis is paced so it no longer piles up with playback resolution, and each track is decoded once for analysis.
+- Less memory during transitions. The Neural Engine beat model has a new version (v2) that holds about 370 MB less, and it is released shortly after use instead of lingering. Peaks drop from about 1.1 GB to about 700 MB.
+- Installed Automix models update themselves when a newer version is pinned; the old one keeps working until the new one is verified. With Wi-Fi-only downloads on, a metered connection still waits for Wi-Fi.
+
+## Lyrics
+
+- Untimed lyrics are aligned against the whole song, including songs in several languages and scripts without spaces.
+- Lyrics on Player can be turned off in Settings.
+
+## Playback
+
+- Songs start faster after launch: the prepared YouTube player is cached on disk.
+- The playing-row bars and the title marquee use far less CPU, especially on Mac.
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.7/BitChord-1.0.7-build16-mac-arm64.dmg" length="19259191" type="application/octet-stream" sparkle:edSignature="ORN+YFCUjrg5yGAGyp/9HfEdvBJzJztkPOr4C/viC3c9g7l2lNM9CLJK7WKgfALPQlQCgsGF2wtAm85Tm7bnDw=="/>
+        </item>
+        <item>
             <title>1.0.6</title>
             <pubDate>Wed, 11 Nov 2026 11:28:57 +0000</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.6</sparkle:fullReleaseNotesLink>
@@ -30,115 +81,9 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.6/BitChord-1.0.6-build15-mac-arm64.dmg" length="19185385" type="application/octet-stream" sparkle:edSignature="xoFt+884h3gDggafASt4ZMVxb7Qpqa0UthL8ftckE008/Vk+eCaABcQTHUEiFoMztvtaeS73MgC6/sheOsm3Cw=="/>
         </item>
-        <item>
-            <title>1.0.5</title>
-            <pubDate>Wed, 11 Nov 2026 11:06:08 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.5</sparkle:fullReleaseNotesLink>
-            <sparkle:version>14</sparkle:version>
-            <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.5
-
-## Artist pages
-
-- Artist pages follow the YouTube Music layout: the name over the artwork, then Shuffle, a large Play button and Subscribe.
-- Top songs have their own heading. Each shelf shows five items with **Show all**, and About comes last with the description, subscriber count and monthly listeners.
-- Every credited artist on a song opens their own page, not only the first. Names without a link are matched exactly, or fall back to a search.
-
-## Now Playing
-
-- The title and artist scroll when they don't fit, with the explicit mark, a star and a More button beside them. Tapping the title opens the album.
-- Artwork follows the track that actually loaded, and old embedded artwork is cleared when the track changes.
-- The playback source line sits centred in the timestamp row.
-- **Mac:** opening the player from a pushed page, such as an artist page, no longer hides the sidebar with no way back. Closing the player returns you to that page.
-
-## Loading screens
-
-- Loading placeholders now have the shape of the page they stand in for: Home shelves, library grids, artist and album pages, Explore tiles and song rows. They no longer jump or resize while they shimmer.
-
-## Playback and lyrics
-
-- When playback fails while you are signed in, BitChord no longer asks you to sign in. A bot check is reported only when YouTube says so for every client; otherwise you get network advice.
-- KuGou lyrics must match the track's artist and script, so an English song no longer gets another artist's Korean lyrics.
-- Nested TTML markup no longer leaks into lyrics, and XML comments are ignored.
-- Sign-in to YouTube Music asks which account to use.
-
-## Mac
-
-- Single-click playback is now a setting (single or double click). The first click on an inactive window works, and typing in search keeps spaces and arrow keys.
-- Toasts clear the playback pill, wrap instead of truncating, and stay up long enough to read.
-- The compact navigation bar appears only in narrow windows.
-
-## Requirements
-
-- iOS and iPadOS 18 or later. The IPA is unsigned: sign it with your own signing app and identity.
-- macOS 15 or later on Apple Silicon. The DMG is ad-hoc signed; existing installs update through Sparkle.
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.5/BitChord-1.0.5-build14-mac-arm64.dmg" length="19166787" type="application/octet-stream" sparkle:edSignature="k2wmWYr8wZBsGGighCuW8BR4zfsyCvEPGyiRCp+3j1Goj5oQwwj9fCY3ZoiIbBh8gYL55IIwywl6SMtpNqhCBg=="/>
-        </item>
-        <item>
-            <title>1.0.4</title>
-            <pubDate>Sun, 01 Nov 2026 21:27:27 +0100</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.4</sparkle:fullReleaseNotesLink>
-            <sparkle:version>13</sparkle:version>
-            <sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.4
-
-## Automix
-
-- Beat detection now runs on the Neural Engine through Core ML. It is about four to five times faster on Apple Silicon and closer to the original model than before. Short tracks, and anything the Neural Engine can't take, fall back to the CPU.
-- Both Automix models, the beat tracker and the vocal detector, are now optional downloads that are verified on the device. The app no longer bundles the vocal model, so it is smaller. BitChord offers them at launch and in Settings. Without them, Automix uses its built-in fallbacks.
-- When a tempo glide ends, the waveform phase stays put. Tempo-aligned stretches keep stereo phase, and the bass in a transition is no longer lost.
-- Analysis work is capped in CPU and memory, and stale analysis is cancelled.
-
-## Search
-
-- A new **Library** source sits beside YouTube and Addons. It filters your signed-in library (songs, artists, albums, playlists) and the music on this device as you type, without network requests.
-- **iPad:** a round search button grows into the search field. In portrait, the source switcher moves under the top bar.
-- **Mac:** the search field, source switcher, account and Downloads sit in order in the title bar, and switching source re-runs the search.
-
-## iPad
-
-- iPad now uses the system's adaptable sidebar, as Music does. It holds a Playlists section with Liked Music first, and the account and Settings at its foot.
-- Each tab keeps a page history, with back and forward buttons beside the logo (and ⌘[ / ⌘]).
-- The playback pill is capped at the mini-player width. In portrait, the volume row lines up with the Lyrics and Up Next buttons.
-
-## iPhone
-
-- The player pill tucks into the minimized tab bar while you scroll, and rides above the keyboard.
-
-## Playback and sources
-
-- Lossless streams are used whenever the quality setting is Lossless, whatever the output. As upstream does, Bluetooth only sidelines addons that require a lossless-capable output.
-- Lossless sources are preferred before playback starts, and completed quality upgrades are confirmed. BitChord checks decoded formats, and interrupted playback recovers with a capped number of retries.
-- Playback sessions are kept across restarts. Source lists survive storage read failures, and each source shows its check and renewal state.
-- The JioSaavn catalogue and playback work again.
-- Addon session renewal is opt-in and uses provider links you supply.
-- Normalization headroom is back in Transparent playback, and explicit gapless repeat works.
-- Audio settings now separate the requested quality, the measured output and the processing. The quality status is clearer, and the diagnostics refresh live.
-
-## Offline and downloads
-
-- Downloads show per-song progress and pending states.
-- Cached and downloaded songs keep their artwork, and covers come back after launch without network requests. Offline playback is kept.
-
-## Fixes
-
-- Mac: the player's back button responds across its full visible area, and a crash in Settings is fixed.
-- Videos start faster.
-- Leaks during audio engine and interpreter teardown are fixed.
-- The Liquid Glass icon draws its waves at full size.
-- Version & Updates compares both version and build, and offers the installer for your platform.
-
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.4/BitChord-1.0.4-build13-mac-arm64.dmg" length="19108712" type="application/octet-stream" sparkle:edSignature="O8oOzE6813XZXeKW4rHhGV1xY+/10ehvoHY0Gzi0UugaD5T8aTyMQ+Lx+TfAFPTbqLhnvU19h7zb9QMZGY9JBA=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: UmZCUauScEpuQ9pYxbZbFdDPWlFh+jcELiSiw31uQe7p3mPT0OXXaEDlsa5TLViaGjrn3teGxyx/joZh8oMIDw==
-length: 9490
+edSignature: nmhIiYcQ6cTOCT1+c6XlctNAdfXSus88zpg11GT9CBadVzcAul4uU3+IPQGlSJp9McOwshk1jrdcTUURAf9cAQ==
+length: 5686
 -->

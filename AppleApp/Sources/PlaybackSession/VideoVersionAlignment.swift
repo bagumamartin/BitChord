@@ -108,7 +108,7 @@ actor VideoVersionAlignment {
             catch { return nil }
             let songAudio = work.appendingPathComponent("song.audio")
             let videoAudio = work.appendingPathComponent("video.audio")
-            defer { try? FileManager.default.removeItem(at: work) }
+            defer { try? FileManager.default.removeItem(at: work); MemoryRelief.soon() }
             let fetchStarted = Date()
             do {
                 async let song: Void = Self.download(videoId: songId, to: songAudio)
@@ -204,8 +204,10 @@ actor VideoVersionAlignment {
 /// one such call running at a time; cancelled queued jobs never start one.
 private actor VideoAlignmentWorker {
     static let shared = VideoAlignmentWorker()
-    func align(song: String, video: String) -> VersionAlignmentRec? {
+    func align(song: String, video: String) async -> VersionAlignmentRec? {
         guard !Task.isCancelled else { return nil }
-        return alignVersions(songPath: song, otherPath: video)
+        return await AnalysisTurns.take {
+            Task.isCancelled ? nil : alignVersions(songPath: song, otherPath: video)
+        }
     }
 }

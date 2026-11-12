@@ -79,22 +79,33 @@ import platform.Foundation.valueForHTTPHeaderField
 actual object Http {
 
     private val cookieJar: NSHTTPCookieStorage =
-        NSHTTPCookieStorage.sharedCookieStorageForGroupContainerIdentifier("group.app.bitchord.BitChord")
+        NSHTTPCookieStorage.sharedCookieStorageForGroupContainerIdentifier("group.app.bitchord.BitChord").also { jar ->
+            // Builds before 1.0.8 let YouTube's identity cookies settle here and
+            // in the process-wide store the Swift side's requests used.
+            listOf(jar, NSHTTPCookieStorage.sharedHTTPCookieStorage).forEach { store ->
+                store.cookies?.filterIsInstance<NSHTTPCookie>()
+                    ?.filterNot { CredentialPolicy.jarServes(it.domain.removePrefix(".")) }
+                    ?.forEach { store.deleteCookie(it) }
+            }
+        }
 
     /**
      * The one client. `httpShouldSetCookies` stays on so provider cookies
      * written by [setHostCookies] are sent, and so a provider's own `Set-Cookie`
      * rotations are honoured across requests. Neither reaches the account
-     * session: nothing writes that here, and the youtube.com cookies Google sets
-     * in response to an innertube call are not credentials.
+     * session: nothing writes that here, and requests to Google hosts neither
+     * read nor write the jar.
      */
     internal actual val client: HttpClient = HttpClient(Darwin) {
         engine {
             configureRequest {
                 // An explicit account snapshot owns this request's Cookie
                 // header. Do not let anonymous/provider jar cookies compete
-                // with it when Foundation builds the actual request.
-                if (valueForHTTPHeaderField("Cookie") != null) HTTPShouldHandleCookies = false
+                // with it when Foundation builds the actual request. Google
+                // hosts never touch the jar at all: see [CredentialPolicy.jarServes].
+                if (valueForHTTPHeaderField("Cookie") != null || !CredentialPolicy.jarServes(URL?.host)) {
+                    HTTPShouldHandleCookies = false
+                }
             }
             configureSession {
                 HTTPShouldSetCookies = true

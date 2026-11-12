@@ -12,8 +12,41 @@ class PlaybackClientStrategyTest {
     private val allProviders = PoTokenProviderKind.entries.toSet()
 
     @Test
+    fun disablingBoundedRangesRetainsAllowedHlsTransport() {
+        val selection =
+            ContentAwareFallbackStrategy().selectClients(
+                ClientSelectionRequest(
+                    hints = ContentHints().withStreamCapabilities(allowHls = true, allowBoundedRange = false),
+                    authenticated = false,
+                    availablePoTokenProviders = allProviders,
+                    javaScriptRuntimeAvailable = true,
+                    webViewAvailable = true,
+                ),
+            )
+        assertTrue(selection.candidates.any { it.manifest?.id == "TVHTML5_SIMPLY" })
+        assertTrue(selection.candidates.none { it.client.clientName == "ANDROID_VR" })
+    }
+
+    @Test
+    fun disablingHlsRetainsMixedDirectCandidates() {
+        val selection =
+            ContentAwareFallbackStrategy().selectClients(
+                ClientSelectionRequest(
+                    hints = ContentHints().withStreamCapabilities(allowHls = false, allowSabr = false, allowBoundedRange = false),
+                    authenticated = true,
+                    availablePoTokenProviders = allProviders,
+                    javaScriptRuntimeAvailable = true,
+                    webViewAvailable = true,
+                ),
+            )
+        assertTrue(selection.candidates.any { it.manifest?.id == "WEB_REMIX" })
+        assertTrue(selection.candidates.none { it.client.useSabr })
+        assertTrue(selection.rejected.any { "available transports disabled" in it.reasons })
+    }
+
+    @Test
     fun catalogProfilesHaveConsistentManifestInvariants() {
-        assertEquals(35, PlaybackClientCatalog.benchmarkOptions.size)
+        assertEquals(36, PlaybackClientCatalog.benchmarkOptions.size)
         assertEquals(
             PlaybackClientCatalog.manifests.size,
             PlaybackClientCatalog.manifests
@@ -28,7 +61,7 @@ class PlaybackClientStrategyTest {
 
     @Test
     fun requestedProbeClientsStayExplicitAndConservative() {
-        val ids = setOf("IOS_MUSIC", "ANDROID_KIDS", "ANDROID_PRODUCER", "MEDIA_CONNECT_FRONTEND")
+        val ids = setOf("IOS_MUSIC", "ANDROID_PRODUCER", "MEDIA_CONNECT_FRONTEND")
         val probes = ids.map { checkNotNull(PlaybackClientCatalog.findBenchmark(it)?.manifest) }
 
         assertTrue(probes.all { it.selectionMode == ClientSelectionMode.PROBE_ONLY })
@@ -48,7 +81,7 @@ class PlaybackClientStrategyTest {
     }
 
     @Test
-    fun premiumDemotionRequiresHighQualityIntent() {
+    fun premiumNormalAudioKeepsTokenBackedDirectForBothQualityIntents() {
         val strategy = ContentAwareFallbackStrategy()
         val request =
             ClientSelectionRequest(
@@ -63,7 +96,7 @@ class PlaybackClientStrategyTest {
         val high = strategy.selectClients(request, premiumHighQuality = true)
 
         assertEquals(
-            "WEB_EMBEDDED_PLAYER",
+            "WEB_REMIX",
             normal.candidates
                 .first()
                 .manifest
@@ -114,7 +147,7 @@ class PlaybackClientStrategyTest {
         )
         assertTrue(signedOutPremium.rejected.any { it.manifest.id == "WEB_REMIX" })
         assertEquals(
-            "WEB_EMBEDDED_PLAYER",
+            "VISIONOS_SABR",
             signedOutPremium.candidates
                 .first()
                 .manifest
@@ -136,7 +169,12 @@ class PlaybackClientStrategyTest {
                     ),
                 ).candidates
 
-        assertEquals("WEB_EMBEDDED_PLAYER", candidates.first().manifest?.id)
+        assertEquals("WEB_REMIX", candidates.first().manifest?.id)
+        assertTrue(candidates.none { it.manifest?.id == "WEB_EMBEDDED_PLAYER" })
+        assertEquals(
+            CapabilitySupport.UNSUPPORTED,
+            PlaybackClientCatalog.findManifest("WEB_EMBEDDED_PLAYER")?.content?.supportFor(ContentHints()),
+        )
         assertTrue(candidates.none { it.manifest?.id == "VISIONOS_0_1" })
         assertTrue(strategy.resolveClients(ContentHints()).none { it == YouTubeClient.VISIONOS_0_1 })
         assertTrue(PlaybackClientCatalog.automaticManifests.none { it.id == "VISIONOS_0_1" })
@@ -243,7 +281,6 @@ class PlaybackClientStrategyTest {
             request.hints.copy(isKidsContent = true),
             request.hints.copy(isLive = true),
             request.hints.copy(isUploaded = true),
-            request.hints.copy(wantVideo = true),
         )) {
             assertTrue(strategy.selectClients(request.copy(hints = hints)).candidates.none { it.manifest?.id == "VISIONOS_SABR" })
         }
@@ -378,11 +415,11 @@ class PlaybackClientStrategyTest {
                         webViewAvailable = true,
                     ),
                 ).candidates
-        assertEquals("WEB_KIDS", candidates.first().manifest?.id)
+        assertEquals(listOf("ANDROID_KIDS", "WEB_KIDS"), candidates.take(2).map { it.manifest?.id })
     }
 
     @Test
-    fun legacyVisionosAutomaticSelectionIsLimitedToNormalAudio() {
+    fun legacyVisionosAutomaticSelectionIsLimitedToNormalAndExplicitAudio() {
         val strategy = ContentAwareFallbackStrategy()
         val request =
             ClientSelectionRequest(
@@ -391,7 +428,7 @@ class PlaybackClientStrategyTest {
                 availablePoTokenProviders = allProviders,
                 webViewAvailable = true,
             )
-        assertEquals(CapabilitySupport.LIMITED, PlaybackClientCatalog.findManifest("VISIONOS_0_1")?.content?.explicit)
+        assertEquals(CapabilitySupport.SUPPORTED, PlaybackClientCatalog.findManifest("VISIONOS_0_1")?.content?.explicit)
         assertEquals(ClientSelectionMode.PROBE_ONLY, PlaybackClientCatalog.findManifest("VISIONOS_0_1")?.selectionMode)
         assertTrue(strategy.selectClients(request.copy(hints = ContentHints())).candidates.none { it.manifest?.id == "VISIONOS_0_1" })
         assertEquals(
@@ -412,8 +449,17 @@ class PlaybackClientStrategyTest {
                 ).candidates
                 .none { it.manifest?.id == "VISIONOS_0_1" },
         )
+        assertEquals(
+            "VISIONOS_0_1",
+            strategy
+                .selectClients(request, premiumHighQuality = false, visitorDataAvailable = true)
+                .candidates
+                .first()
+                .manifest
+                ?.id,
+        )
         listOf(
-            ContentHints(isExplicit = true),
+            ContentHints(isExplicit = true, wantVideo = true),
             ContentHints(isKidsContent = true),
             ContentHints(isAgeRestricted = true),
             ContentHints(isLive = true),
@@ -435,6 +481,38 @@ class PlaybackClientStrategyTest {
                 .single()
                 .manifest
                 ?.id,
+        )
+    }
+
+    @Test
+    fun authenticatedVideoKeepsCookieLessSabrFirstUnlessPremium() {
+        val request =
+            ClientSelectionRequest(
+                hints = ContentHints(isExplicit = true, wantVideo = true),
+                authenticated = true,
+                availablePoTokenProviders = allProviders,
+                webViewAvailable = true,
+                transportPreference = PlaybackTransportPreference.SABR,
+            )
+        val strategy = ContentAwareFallbackStrategy()
+        listOf(request, request.copy(hints = ContentHints(wantVideo = true))).forEach {
+            assertEquals(
+                "VISIONOS_SABR",
+                strategy
+                    .selectClients(it)
+                    .candidates
+                    .first()
+                    .manifest
+                    ?.id,
+            )
+        }
+        assertTrue(
+            strategy
+                .selectClients(request.copy(premium = true))
+                .candidates
+                .first()
+                .manifest
+                ?.authentication != AuthenticationPolicy.UNSUPPORTED,
         )
     }
 

@@ -62,8 +62,8 @@ struct LyricTimeline {
         ends.reserveCapacity(lines.count)
         holds.reserveCapacity(lines.count)
         gaps.reserveCapacity(lines.count)
+        starts = Self.startTimes(lines)
         for line in lines {
-            starts.append(Self.startMs(line))
             ends.append(line.endMs)
             holds.append(line.hasKnownEnd || line.background?.hasKnownEnd == true)
             gaps.append(line.isGap)
@@ -74,6 +74,40 @@ struct LyricTimeline {
         self.gaps = gaps
         self.synced = synced
     }
+
+    /// `LyricFocus.startTimes`: an untimed line in a partly timed lyric sits
+    /// between the timed lines around it (a few seconds a line past the last
+    /// one) instead of reading as "started at zero", which made the last
+    /// untimed line in the song the current one and threw the highlight to a
+    /// chorus minutes away while BitChord was still timing the words.
+    static func startTimes(_ lines: [LyricLineDto]) -> [Int64] {
+        let raw = lines.map(startMs)
+        let known = raw.indices.map { $0 == 0 || raw[$0] > 0 }
+        if known.allSatisfy({ $0 }) { return raw }
+        var starts = raw
+        var previous = 0
+        var index = 1
+        while index < lines.count {
+            if known[index] {
+                previous = index
+                index += 1
+                continue
+            }
+            var next = index
+            while next < lines.count, !known[next] { next += 1 }
+            let base = raw[previous]
+            for missing in index..<next {
+                let steps = Int64(missing - previous)
+                starts[missing] = next < lines.count
+                    ? base + max(raw[next] - base, 0) * steps / Int64(next - previous)
+                    : base + untimedLineMs * steps
+            }
+            index = next
+        }
+        return starts
+    }
+
+    private static let untimedLineMs: Int64 = 4_000
 
     /// A missing line stamp falls back to the first word's.
     static func startMs(_ line: LyricLineDto) -> Int64 {
@@ -170,10 +204,10 @@ final class PreparedLyrics {
         timeline = LyricTimeline(lines: lines, synced: synced)
         var rows: [LyricRow] = []
         rows.reserveCapacity(lines.count)
+        let starts = LyricTimeline.startTimes(lines)
         for (index, line) in lines.enumerated() {
-            let next = index + 1 < lines.count ? lines[index + 1] : nil
             rows.append(Self.row(line, at: index, synced: synced,
-                                 until: next.map(LyricTimeline.startMs) ?? line.endMs))
+                                 until: index + 1 < lines.count ? starts[index + 1] : line.endMs))
         }
         self.rows = rows
         duet = lines.contains { $0.alignment == .end }

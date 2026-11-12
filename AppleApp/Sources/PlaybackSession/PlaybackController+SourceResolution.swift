@@ -301,7 +301,8 @@ extension PlaybackController {
                 )
                 let buffered = try await bufferPreparedSource(selected, mediaId: entry.id)
                 if buffered.source.source.hasPrefix("/"),
-                   await RecordingIdentityVerifier.matches(videoId: videoId, candidate: buffered.source.source, allowTimingEdits: true) {
+                   await RecordingIdentityVerifier.matches(videoId: videoId, candidate: buffered.source.source,
+                                                           allowTimingEdits: true, urgent: true) {
                     await StreamFileCache.shared.markRecordingVerified(mediaID: entry.id,
                         cacheKey: "\(entry.id)#prepared-\(DiskCache.hashName(stream.url))", sourcePath: buffered.source.source)
                     await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "verified source substitute")

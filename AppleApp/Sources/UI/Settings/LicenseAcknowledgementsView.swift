@@ -6,7 +6,7 @@ struct LicenseAcknowledgementsView: View {
     private let acknowledgements: [Acknowledgement] = [
         .init(
             name: "BitChord and InnerTubeX",
-            detail: "The Apple port is derived from BitChord by Kushagra Singh. YouTube Music extraction uses the vendored InnerTubeX client.",
+            detail: "The Apple port is derived from BitChord by Kushagra Singh. YouTube Music extraction uses the vendored InnerTubeX client and its QuackJS interpreter.",
             license: "GPL-3.0",
             file: "GPL-3.0.txt",
             url: "https://github.com/bagumamartin/BitChord/blob/main/LICENSE"
@@ -62,7 +62,7 @@ struct LicenseAcknowledgementsView: View {
         ),
         .init(
             name: "Kotlin shared framework",
-            detail: "The shared framework uses Kotlin Multiplatform, Ktor, kotlinx serialization/coroutines, KMP-NativeCoroutines and QuickJS-KT. Versions and source sets are listed in the Gradle manifests.",
+            detail: "The shared framework uses Kotlin Multiplatform, Ktor, kotlinx serialization/coroutines, and KMP-NativeCoroutines. Versions and source sets are listed in the Gradle manifests.",
             license: "Apache-2.0",
             file: "Apache-2.0.txt",
             url: "https://github.com/bagumamartin/BitChord/blob/main/THIRD_PARTY_NOTICES.md"
