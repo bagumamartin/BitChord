@@ -16,4 +16,13 @@ class CredentialPolicyTest {
         assertFalse(CredentialPolicy.mayRedirect("https://one.invalid", "http://two.invalid", false))
         assertTrue(CredentialPolicy.sameOrigin("https://EXAMPLE.invalid", "https://example.invalid:443/path"))
     }
+    @Test fun theJarNeverServesGoogleHosts() {
+        listOf("www.youtube.com", "music.youtube.com", "youtube.com", "YouTube.com.", "youtubei.googleapis.com",
+            "rr3---sn-abc.googlevideo.com", "accounts.google.com", "i.ytimg.com").forEach {
+            assertFalse(CredentialPolicy.jarServes(it), it)
+        }
+        listOf("open.spotify.com", "notyoutube.com", "youtube.com.example.invalid", null).forEach {
+            assertTrue(CredentialPolicy.jarServes(it), it.toString())
+        }
+    }
 }

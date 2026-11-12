@@ -3,11 +3,18 @@ package com.metrolist.innertubex.extraction
 import com.metrolist.innertubex.InnerTube
 import com.metrolist.innertubex.InnerTubeLogger
 import com.metrolist.innertubex.extraction.strategy.AuthenticationPolicy
+import com.metrolist.innertubex.extraction.strategy.ClientFailureKind
 import com.metrolist.innertubex.extraction.strategy.ClientFallbackStrategy
+import com.metrolist.innertubex.extraction.strategy.ClientHealthMonitor
+import com.metrolist.innertubex.extraction.strategy.ClientHealthScope
 import com.metrolist.innertubex.extraction.strategy.ClientSelectionRequest
 import com.metrolist.innertubex.extraction.strategy.ClientSelectionResult
+import com.metrolist.innertubex.extraction.strategy.ContentAwareFallbackStrategy
+import com.metrolist.innertubex.extraction.strategy.InMemoryClientHealthMonitor
 import com.metrolist.innertubex.extraction.strategy.PlaybackClientCatalog
+import com.metrolist.innertubex.extraction.strategy.PlaybackTransportPreference
 import com.metrolist.innertubex.extraction.strategy.PoTokenProviderKind
+import com.metrolist.innertubex.extraction.strategy.PoTokenRequirement
 import com.metrolist.innertubex.extraction.strategy.SelectedClient
 import com.metrolist.innertubex.models.YouTubeClient
 import io.ktor.client.HttpClient
@@ -19,17 +26,275 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
 
 class PlayerClientDirectorTest {
+    @Test
+    fun forcedGvsOnlyMintOverlapsPlayerAndRejectsInvalidBindings() =
+        runBlocking {
+            for (outcome in listOf("valid", "missing", "wrong-visitor", "empty-gvs")) {
+                val playerStarted = CompletableDeferred<Unit>()
+                val tokenStarted = CompletableDeferred<Unit>()
+                val client =
+                    HttpClient(
+                        MockEngine {
+                            playerStarted.complete(Unit)
+                            tokenStarted.await()
+                            respond(PLAYER_RESPONSE, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        },
+                    ) { install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) } }
+                val innerTube = InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" }
+                val provider =
+                    object : TokenProvider {
+                        override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD))
+
+                        override suspend fun getPoToken(
+                            videoId: String,
+                            visitorData: String,
+                            cookie: String?,
+                        ): PoTokenResult? {
+                            tokenStarted.complete(Unit)
+                            playerStarted.await()
+                            return when (outcome) {
+                                "missing" -> null
+                                "wrong-visitor" -> PoTokenResult("", "fixture-gvs", "other-visitor")
+                                "empty-gvs" -> PoTokenResult("fixture-player", "", visitorData)
+                                else -> PoTokenResult("", "fixture-gvs", visitorData)
+                            }
+                        }
+                    }
+                try {
+                    val director =
+                        PlayerClientDirector(innerTube, fixed(checkNotNull(PlaybackClientCatalog.findManifest("WEB_REMIX"))), provider)
+                    val batch =
+                        withTimeout(2_000) {
+                            director.fetchPlayerResponses(
+                                "video",
+                                PlayerConfig("player.js", null, null, null),
+                                ContentHints(playbackClientOverrideId = "WEB_REMIX"),
+                            )
+                        }
+                    if (outcome == "valid") {
+                        assertEquals("fixture-gvs", batch.playableResponses.single().streamingDataPoToken)
+                    } else {
+                        assertTrue(batch.playableResponses.isEmpty())
+                        assertEquals("po_token_unavailable", batch.attempts.single().outcome)
+                    }
+                    assertEquals(1, (client.engine as MockEngine).requestHistory.size)
+                } finally {
+                    client.close()
+                }
+            }
+        }
+
+    @Test
+    fun disabledAutomaticTransportsDoNotRequestPlayersOrTokens() =
+        runBlocking {
+            var requests = 0
+            var tokenRequests = 0
+            val client =
+                client {
+                    requests++
+                    PLAYER_RESPONSE
+                }
+            val provider =
+                object : TokenProvider {
+                    override val capabilities = TokenProviderCapabilities(PoTokenProviderKind.entries.toSet(), usesWebView = true)
+
+                    override suspend fun getPoToken(
+                        videoId: String,
+                        visitorData: String,
+                        cookie: String?,
+                    ): PoTokenResult? {
+                        tokenRequests++
+                        return null
+                    }
+                }
+            val director =
+                PlayerClientDirector(
+                    InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" },
+                    ContentAwareFallbackStrategy(),
+                    provider,
+                )
+            val excluded =
+                PlaybackClientCatalog.manifests
+                    .filterNot {
+                        it.client.useSabr || requiresBoundedMediaRange(it.client.clientName)
+                    }.map { it.id }
+                    .toSet()
+            val batch =
+                director.fetchPlayerResponses(
+                    "video",
+                    PlayerConfig("player.js", null, null, null),
+                    ContentHints().withStreamCapabilities(allowHls = false, allowSabr = false, allowBoundedRange = false),
+                    excludedClients = excluded,
+                )
+            assertTrue(batch.playableResponses.isEmpty())
+            assertTrue(batch.attempts.isNotEmpty())
+            assertEquals(0, requests)
+            assertEquals(0, tokenRequests)
+            client.close()
+        }
+
+    @Test
+    fun exhaustedRetryBudgetDoesNotPenalizeClientHealth() =
+        runBlocking {
+            var requests = 0
+            val client =
+                client {
+                    requests++
+                    PLAYER_RESPONSE
+                }
+            val original = checkNotNull(PlaybackClientCatalog.findManifest("WEB_REMIX"))
+            val manifest =
+                original.copy(
+                    poTokens =
+                        original.poTokens.copy(
+                            player = original.poTokens.gvs.copy(requirement = PoTokenRequirement.OPTIONAL),
+                        ),
+                )
+            val failures = mutableListOf<ClientFailureKind>()
+            val provider =
+                object : TokenProvider {
+                    override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD))
+
+                    override suspend fun getPoToken(
+                        videoId: String,
+                        visitorData: String,
+                        cookie: String?,
+                    ) = PoTokenResult("player-token", "stream-token", visitorData)
+                }
+            val director =
+                PlayerClientDirector(
+                    InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" },
+                    fixed(manifest),
+                    provider,
+                    clientHealthMonitor =
+                        object : ClientHealthMonitor {
+                            override fun recordFailure(
+                                clientId: String,
+                                kind: ClientFailureKind,
+                                scope: ClientHealthScope?,
+                            ) {
+                                failures += kind
+                            }
+                        },
+                )
+            val budget = PlayerRequestBudget(1)
+            val batch =
+                director.fetchPlayerResponses(
+                    "video",
+                    PlayerConfig("player.js", null, null, null),
+                    ContentHints(),
+                    requestBudget = budget,
+                )
+            assertEquals(1, requests)
+            assertEquals(0, budget.remaining)
+            assertTrue(batch.playableResponses.isEmpty())
+            assertTrue(batch.requestFailures.isEmpty())
+            assertTrue(batch.failures.isEmpty())
+            assertTrue(failures.isEmpty())
+            assertEquals("request_budget_exhausted", batch.attempts.single().outcome)
+            client.close()
+        }
+
+    @Test
+    fun videoSpecificFailuresDoNotDemoteClientsAcrossVideos() =
+        runBlocking {
+            for (status in listOf("ERROR", "VIDEO_UNAVAILABLE", "LIVE_STREAM_OFFLINE", "UNPLAYABLE")) {
+                var response = """{"playabilityStatus":{"status":"$status"}}"""
+                val client = client { response }
+                try {
+                    val health = InMemoryClientHealthMonitor(nowMs = { 0L })
+                    val manifest = checkNotNull(PlaybackClientCatalog.findManifest("VISIONOS"))
+                    val hints = ContentHints(isLive = status == "LIVE_STREAM_OFFLINE")
+                    val scope = ClientHealthScope.from(hints, authenticated = false)
+                    val director = PlayerClientDirector(InnerTube(client), fixed(manifest), NoTokenProvider, health)
+                    repeat(2) {
+                        val batch = director.fetchPlayerResponses("unavailable-$it", PlayerConfig("player.js", null, null, null), hints)
+                        assertEquals(status, batch.failures.single().status)
+                    }
+                    val adjustment = health.scoreAdjustment(manifest.id, scope)
+                    if (status == "UNPLAYABLE") {
+                        assertTrue(adjustment < -1_000, "client-level failures still start a cooldown")
+                    } else {
+                        assertEquals(0, adjustment, status)
+                    }
+                    response = PLAYER_RESPONSE
+                    val next = director.fetchPlayerResponses("available", PlayerConfig("player.js", null, null, null), hints)
+                    assertEquals(1, next.playableResponses.size)
+                    assertEquals(adjustment, health.scoreAdjustment(manifest.id, scope), "only the host clears media cooldowns")
+                } finally {
+                    client.close()
+                }
+            }
+        }
+
+    @Test
+    fun embeddedConfigVisitorOverridesSessionVisitor() =
+        runBlocking {
+            val sentVisitors = mutableListOf<String?>()
+            val client =
+                HttpClient(
+                    MockEngine { request ->
+                        sentVisitors += request.headers["X-Goog-Visitor-Id"]
+                        respond(PLAYER_RESPONSE, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                    },
+                ) {
+                    install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+                }
+            val innerTube = InnerTube(client, retryDelay = {}).also { it.visitorData = "session-visitor" }
+            val embedded = fixed(checkNotNull(PlaybackClientCatalog.findManifest("WEB_EMBEDDED_PLAYER")))
+
+            PlayerClientDirector(innerTube, embedded, NoTokenProvider)
+                .fetchPlayerResponses("video", PlayerConfig("player.js", 1, "embed-visitor", null, "flags"), ContentHints())
+            PlayerClientDirector(innerTube, embedded, NoTokenProvider)
+                .fetchPlayerResponses("video", PlayerConfig("player.js", 1, "page-visitor", null), ContentHints())
+
+            assertEquals(listOf<String?>("embed-visitor", "session-visitor"), sentVisitors)
+            client.close()
+        }
+
+    @Test
+    fun videoRequestsPreferSabrTransport() =
+        runBlocking {
+            val client = client { PLAYER_RESPONSE }
+            val manifest = checkNotNull(PlaybackClientCatalog.findManifest("VISIONOS"))
+            val preferences = mutableListOf<PlaybackTransportPreference>()
+            val director =
+                PlayerClientDirector(
+                    InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" },
+                    object : ClientFallbackStrategy {
+                        override fun resolveClients(hints: ContentHints) = listOf(manifest.client)
+
+                        override fun selectClients(request: ClientSelectionRequest): ClientSelectionResult {
+                            preferences += request.transportPreference
+                            return ClientSelectionResult(listOf(SelectedClient(manifest.client, manifest)))
+                        }
+                    },
+                    NoTokenProvider,
+                )
+
+            listOf(ContentHints(wantVideo = true), ContentHints()).forEach {
+                director.fetchPlayerResponses("video", PlayerConfig("player.js", null, null, null), it)
+            }
+
+            assertEquals(listOf(PlaybackTransportPreference.SABR, PlaybackTransportPreference.AUTO), preferences)
+            client.close()
+        }
+
     @Test
     fun authenticatedPremiumManualOverrideSkipsTokenMinting() =
         runBlocking {
@@ -165,7 +430,44 @@ class PlayerClientDirectorTest {
         }
 
     @Test
-    fun tokenVisitorChangeCancelsBeforeSendingOldCredentials() =
+    fun incompatibleProviderDoesNotStartAnUnusedOverlappedMint() =
+        runBlocking {
+            var tokenRequests = 0
+            val client = client { TOKEN_PLAYER_RESPONSE }
+            try {
+                val provider =
+                    object : TokenProvider {
+                        override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD))
+
+                        override suspend fun getPoToken(
+                            videoId: String,
+                            visitorData: String,
+                            cookie: String?,
+                        ): PoTokenResult? {
+                            tokenRequests++
+                            return null
+                        }
+                    }
+                val manifest = checkNotNull(PlaybackClientCatalog.findManifest("WEB_SABR"))
+                val innerTube = InnerTube(client).also { it.visitorData = "visitor" }
+                val budget = PlayerRequestBudget(2)
+                val batch =
+                    PlayerClientDirector(innerTube, fixed(manifest), provider)
+                        .fetchPlayerResponses("video", PlayerConfig("player.js", null, null, null), ContentHints(), requestBudget = budget)
+
+                assertEquals(0, tokenRequests)
+                assertEquals(1, budget.remaining)
+                assertTrue(batch.playableResponses.isEmpty())
+                assertTrue(batch.requestFailures.isEmpty())
+                assertEquals("po_token_unavailable", batch.attempts.single().outcome)
+                assertFalse(budget.isTokenUnavailable(PoTokenRequestKey("video", "visitor", null)))
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun tokenVisitorChangeCancelsOverlappedRequestBeforeAcceptingResponse() =
         runBlocking {
             var requests = 0
             val client =
@@ -174,7 +476,7 @@ class PlayerClientDirectorTest {
                         requests++
                         respond(PLAYER_RESPONSE, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
                     },
-                )
+                ) { install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) } }
             val innerTube = InnerTube(client, retryDelay = {}).also { it.visitorData = "old-visitor" }
             val manifest = checkNotNull(PlaybackClientCatalog.findManifest("WEB_REMIX"))
             val provider =
@@ -198,7 +500,7 @@ class PlayerClientDirectorTest {
                     ContentHints(playbackClientOverrideId = "WEB_REMIX"),
                 )
             }
-            assertEquals(0, requests)
+            assertTrue(requests <= 1)
             client.close()
         }
 
@@ -264,19 +566,123 @@ class PlayerClientDirectorTest {
         }
 
     @Test
-    fun unavailablePoTokenIsRequestedOnlyOncePerBatch() =
+    fun unavailablePoTokenIsRequestedOnlyOncePerIdentityAcrossBatches() =
         runBlocking {
-            val client = client { PLAYER_RESPONSE }
-            val innerTube =
-                InnerTube(client, retryDelay = {}).also {
-                    it.visitorData = "visitor"
-                    it.cookie = "SAPISID=test"
+            for (throwFromProvider in listOf(false, true)) {
+                val client = client { PLAYER_RESPONSE }
+                val innerTube =
+                    InnerTube(client, retryDelay = {}).also {
+                        it.visitorData = "visitor"
+                        it.cookie = "SAPISID=test"
+                    }
+                var tokenRequests = 0
+                val provider =
+                    object : TokenProvider {
+                        override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD), usesWebView = true)
+
+                        override suspend fun getPoToken(
+                            videoId: String,
+                            visitorData: String,
+                            cookie: String?,
+                        ): PoTokenResult? {
+                            tokenRequests++
+                            if (throwFromProvider) error("Provider unavailable")
+                            return null
+                        }
+                    }
+                val manifests = listOf("WEB_REMIX", "WEB_CREATOR").map { checkNotNull(PlaybackClientCatalog.findManifest(it)) }
+                val failures = mutableListOf<ClientFailureKind>()
+                val director =
+                    PlayerClientDirector(
+                        innerTube,
+                        object : ClientFallbackStrategy {
+                            override fun resolveClients(hints: ContentHints) = manifests.map { it.client }
+
+                            override fun selectClients(request: ClientSelectionRequest) =
+                                ClientSelectionResult(manifests.map { SelectedClient(it.client, it) })
+                        },
+                        provider,
+                        clientHealthMonitor =
+                            object : ClientHealthMonitor {
+                                override fun recordFailure(
+                                    clientId: String,
+                                    kind: ClientFailureKind,
+                                    scope: ClientHealthScope?,
+                                ) {
+                                    failures += kind
+                                }
+                            },
+                    )
+                val budget = PlayerRequestBudget(12)
+
+                suspend fun fetch() =
+                    director.fetchPlayerResponses(
+                        "video",
+                        PlayerConfig("player.js", null, null, null),
+                        ContentHints(),
+                        requestBudget = budget,
+                    )
+                repeat(2) {
+                    assertTrue(fetch().requestFailures.isEmpty())
                 }
+                assertEquals(1, tokenRequests)
+                assertTrue(failures.isEmpty())
+                innerTube.visitorData = "new-visitor"
+                fetch()
+                assertEquals(2, tokenRequests)
+                innerTube.cookie = "SAPISID=new"
+                fetch()
+                assertEquals(3, tokenRequests)
+                client.close()
+            }
+        }
+
+    @Test
+    fun failedMatchingPrefetchIsNotMintedAgain() =
+        runBlocking {
+            for (timeout in listOf(false, true)) {
+                var tokenRequests = 0
+                val provider =
+                    object : TokenProvider {
+                        override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD))
+
+                        override suspend fun getPoToken(
+                            videoId: String,
+                            visitorData: String,
+                            cookie: String?,
+                        ): PoTokenResult? {
+                            tokenRequests++
+                            if (timeout) delay(10_000)
+                            return null
+                        }
+                    }
+                val prefetched = withTimeoutOrNull(10) { provider.getPoToken("video", "visitor", null) }
+                val prefetch = PoTokenPrefetch(PoTokenRequestKey("video", "visitor", null), CompletableDeferred(prefetched))
+                val client = client { PLAYER_RESPONSE }
+                val innerTube = InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" }
+                val director =
+                    PlayerClientDirector(innerTube, fixed(checkNotNull(PlaybackClientCatalog.findManifest("WEB_REMIX"))), provider)
+                val batch =
+                    director.fetchPlayerResponses(
+                        "video",
+                        PlayerConfig("player.js", null, null, null),
+                        ContentHints(),
+                        prefetchedPoToken = prefetch,
+                    )
+                assertEquals(1, tokenRequests)
+                assertTrue(batch.requestFailures.isEmpty())
+                assertEquals("po_token_unavailable", batch.attempts.single().outcome)
+                client.close()
+            }
+        }
+
+    @Test
+    fun mismatchedPrefetchDoesNotSuppressMintingAndCancellationPropagates() =
+        runBlocking {
             var tokenRequests = 0
             val provider =
                 object : TokenProvider {
-                    override val capabilities =
-                        TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD), usesWebView = true)
+                    override val capabilities = TokenProviderCapabilities(setOf(PoTokenProviderKind.WEB_BOTGUARD))
 
                     override suspend fun getPoToken(
                         videoId: String,
@@ -284,28 +690,27 @@ class PlayerClientDirectorTest {
                         cookie: String?,
                     ): PoTokenResult? {
                         tokenRequests++
-                        return null
+                        throw CancellationException("cancelled")
                     }
                 }
-            val manifests =
-                listOf("WEB_REMIX", "WEB_CREATOR").map { id ->
-                    checkNotNull(PlaybackClientCatalog.findManifest(id))
+            val client = client { PLAYER_RESPONSE }
+            val innerTube = InnerTube(client, retryDelay = {}).also { it.visitorData = "visitor" }
+            val director = PlayerClientDirector(innerTube, fixed(checkNotNull(PlaybackClientCatalog.findManifest("WEB_REMIX"))), provider)
+            for (key in listOf(
+                PoTokenRequestKey("other-video", "visitor", null),
+                PoTokenRequestKey("video", "other-visitor", null),
+                PoTokenRequestKey("video", "visitor", "other-cookie"),
+            )) {
+                assertFailsWith<CancellationException> {
+                    director.fetchPlayerResponses(
+                        "video",
+                        PlayerConfig("player.js", null, null, null),
+                        ContentHints(),
+                        prefetchedPoToken = PoTokenPrefetch(key, CompletableDeferred(null)),
+                    )
                 }
-            val director =
-                PlayerClientDirector(
-                    innerTube,
-                    object : ClientFallbackStrategy {
-                        override fun resolveClients(hints: ContentHints) = manifests.map { it.client }
-
-                        override fun selectClients(request: ClientSelectionRequest) =
-                            ClientSelectionResult(manifests.map { SelectedClient(it.client, it) })
-                    },
-                    provider,
-                )
-
-            director.fetchPlayerResponses("video", PlayerConfig("player.js", null, null, null), ContentHints())
-
-            assertEquals(1, tokenRequests)
+            }
+            assertEquals(3, tokenRequests)
             client.close()
         }
 
@@ -676,7 +1081,7 @@ class PlayerClientDirectorTest {
             """.trimIndent()
         val TOKEN_PLAYER_RESPONSE =
             """
-            {"playabilityStatus":{"status":"OK"},"streamingData":{"serverAbrStreamingUrl":"https://r.googlevideo.com/videoplayback","adaptiveFormats":[{"itag":140,"mimeType":"audio/mp4","bitrate":128000}]},"playerConfig":{"mediaCommonConfig":{"mediaUstreamerRequestConfig":{"videoPlaybackUstreamerConfig":"AQID"}}}}
+            {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"video","lengthSeconds":"180"},"streamingData":{"serverAbrStreamingUrl":"https://r.googlevideo.com/videoplayback","adaptiveFormats":[{"itag":140,"mimeType":"audio/mp4","bitrate":128000,"lastModified":"1700000000000000"},{"itag":160,"mimeType":"video/mp4","bitrate":100000,"width":256,"height":144,"lastModified":"1700000000000000"}]},"playerConfig":{"mediaCommonConfig":{"mediaUstreamerRequestConfig":{"videoPlaybackUstreamerConfig":"AQID"}}}}
             """.trimIndent()
     }
 }

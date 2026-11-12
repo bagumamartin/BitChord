@@ -168,6 +168,9 @@ object Innertube {
      * answers with an anti-hijacking prefix and then plain nested arrays, so
      * the id is found by shape rather than by a path that would rot.
      */
+    /** A visitor id that belongs to no session: never stored here, never tied to the account. */
+    internal suspend fun mintAnonymousVisitor(): String? = fetchVisitorData()
+
     private suspend fun fetchVisitorData(): String? {
         val body = Http.getText(
             "https://www.youtube.com/sw.js_data",

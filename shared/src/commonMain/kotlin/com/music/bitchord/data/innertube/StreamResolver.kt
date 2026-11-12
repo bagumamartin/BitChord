@@ -30,11 +30,13 @@ object StreamResolver {
     private val inFlight = CowMap<String, Flight>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     internal var extraction: suspend (String, Int) -> ResolvedStream? = { id, ceiling -> UpstreamPlaybackExtractor.extract(id, ceiling) }
+    internal var rebuild: suspend (String) -> Unit = { UpstreamPlaybackExtractor.rebuildSession(it) }
     suspend fun resolve(videoId: String, maxKbps: Int = Int.MAX_VALUE): ResolvedStream? {
         val generation = Innertube.sessionGeneration
         val key = "$generation|$videoId|$maxKbps"
         recent.snapshot()[key]?.takeIf { it.at.elapsedNow() < 20.seconds }?.let { return it.stream }
         botCheckedUntil.load()?.takeIf { it.hasNotPassedNow() }?.let { throw BotCheckException() }
+        failed.snapshot()[videoId]?.let { if (it.at.elapsedNow() < FAILURE_MEMORY) throw it.cause }
         val candidate = scope.async(start = CoroutineStart.LAZY) {
             Innertube.checkSession(generation)
             val stream = try {
@@ -43,10 +45,11 @@ object StreamResolver {
                 throw e
             } catch (e: Throwable) {
                 if (isBotChecked(videoId, e)) throw BotCheckException(signedIn = Innertube.cookie != null)
+                remember(videoId, e)
                 throw e
             } ?: run {
                 if (isBotChecked(videoId, null)) throw BotCheckException(signedIn = Innertube.cookie != null)
-                error("No playable stream for $videoId")
+                throw IllegalStateException("No playable stream for $videoId").also { remember(videoId, it) }
             }
             Innertube.checkSession(generation)
             // Validate on the first bounded media range, which is also the
@@ -165,8 +168,35 @@ object StreamResolver {
         return reason.contains("not a bot", ignoreCase = true)
     }
 
+    /**
+     * A track every client just failed is not asked for again for
+     * [FAILURE_MEMORY], and the session is rebuilt at most once per
+     * [REBUILD_SPACING].
+     *
+     * A failed track used to be asked for again by everything that could ask:
+     * the rebuilt session, the counterpart lookup, the queue coming back round,
+     * a listener tapping it twice. One report showed ten failed extractions and
+     * five session rebuilds for a single track in forty seconds — each one a
+     * walk through every client from the same address, which is the traffic
+     * that gets an address challenged. The one retry that can help, on a
+     * rebuilt session, still happens; the rest get the answer already given.
+     */
+    private class Failed(val cause: Throwable, val at: TimeMark)
+    private val failed = CowMap<String, Failed>()
+    private val FAILURE_MEMORY = 30.seconds
+    private val REBUILD_SPACING = 60.seconds
+    private val rebuiltAt = AtomicReference<TimeMark?>(null)
+    private fun remember(videoId: String, cause: Throwable) {
+        val entry = Failed(cause, TimeSource.Monotonic.markNow())
+        failed.update { map ->
+            map.entries.removeAll { it.value.at.elapsedNow() >= FAILURE_MEMORY }
+            map[videoId] = entry
+        }
+    }
+
     fun onSessionChanged() {
         inFlight.snapshot().values.forEach { it.job.cancel() }; inFlight.clear(); recent.clear()
+        failed.clear(); rebuiltAt.store(null)
         botCheckedUntil.store(null)
         DebugLog.d("session changed; cleared upstream resolver flights and media URLs")
     }
@@ -182,8 +212,15 @@ object StreamResolver {
     }
     /** See [UpstreamPlaybackExtractor.rebuildSession]; also drops this track's remembered URLs. */
     suspend fun rebuildSession(videoId: String) {
+        val last = rebuiltAt.load()
+        if (last != null && last.elapsedNow() < REBUILD_SPACING) {
+            DebugLog.w("$videoId: session was rebuilt ${last.elapsedNow().inWholeSeconds}s ago; not rebuilding again yet")
+            return
+        }
+        rebuiltAt.store(TimeSource.Monotonic.markNow())
         recent.update { map -> map.entries.removeAll { it.key.split("|").getOrNull(1) == videoId } }
-        UpstreamPlaybackExtractor.rebuildSession(videoId)
+        failed.update { it.remove(videoId) }
+        rebuild(videoId)
         DebugLog.w("$videoId: every client refused; rebuilt the extraction session")
     }
     fun onFirstRangeRejected(url: String, responseCode: Int, excludeClient: Boolean) {

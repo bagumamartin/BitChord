@@ -9,12 +9,15 @@ import kotlin.test.*
 class StreamResolverRecoveryTest {
     private suspend fun fixture(body: suspend () -> Unit) {
         val extract = StreamResolver.extraction
+        val rebuild = StreamResolver.rebuild
         try {
+            StreamResolver.rebuild = {}
             Innertube.cookie = null
             StreamResolver.onSessionChanged()
             body()
         } finally {
             StreamResolver.extraction = extract
+            StreamResolver.rebuild = rebuild
             Innertube.cookie = null; StreamResolver.onSessionChanged()
         }
     }
@@ -44,6 +47,27 @@ class StreamResolverRecoveryTest {
         }
         assertFailsWith<InvalidFirstMediaRangeException> {
             validateFirstMediaRange(RawHttpBytes(206, ByteArray(1_024), "audio/mp4"))
+        }
+    }
+
+    @Test fun aFailedTrackIsAskedForAgainOnlyOnARebuiltSessionAndRebuildsAreSpaced() = runTest {
+        fixture {
+            Innertube.cookie = "SAPISID=synthetic"
+            var attempts = 0; var rebuilds = 0
+            StreamResolver.extraction = { _, _ -> attempts++; throw IllegalStateException("refused") }
+            StreamResolver.rebuild = { rebuilds++ }
+            repeat(3) { assertFailsWith<IllegalStateException> { StreamResolver.resolve("track") } }
+            assertEquals(1, attempts)
+            StreamResolver.rebuildSession("track")
+            repeat(3) { assertFailsWith<IllegalStateException> { StreamResolver.resolve("track") } }
+            assertEquals(2, attempts)
+            StreamResolver.rebuildSession("track")
+            assertFailsWith<IllegalStateException> { StreamResolver.resolve("track") }
+            assertEquals(2, attempts)
+            assertEquals(1, rebuilds)
+            // Another track is its own question.
+            assertFailsWith<IllegalStateException> { StreamResolver.resolve("other") }
+            assertEquals(3, attempts)
         }
     }
 

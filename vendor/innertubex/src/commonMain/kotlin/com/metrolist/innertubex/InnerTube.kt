@@ -1,5 +1,6 @@
 package com.metrolist.innertubex
 
+import com.metrolist.innertubex.models.Context
 import com.metrolist.innertubex.models.YouTubeClient
 import com.metrolist.innertubex.models.YouTubeLocale
 import com.metrolist.innertubex.models.body.AccountMenuBody
@@ -25,20 +26,26 @@ import com.metrolist.innertubex.utils.sanitizeCookieString
 import com.metrolist.innertubex.utils.sanitizeVisitorData
 import com.metrolist.innertubex.utils.sha1
 import io.ktor.client.HttpClient
+import io.ktor.client.call.replaceResponse
+import io.ktor.client.call.save
+import io.ktor.client.plugins.HttpRedirect
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.expectSuccess
 import io.ktor.client.plugins.onUpload
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.forms.FormDataContent
-import io.ktor.client.request.get
-import io.ktor.client.request.head
 import io.ktor.client.request.header
 import io.ktor.client.request.headers
 import io.ktor.client.request.parameter
-import io.ktor.client.request.post
+import io.ktor.client.request.prepareGet
+import io.ktor.client.request.prepareHead
+import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.HttpStatement
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -52,6 +59,8 @@ import io.ktor.http.encodedPath
 import io.ktor.http.isSuccess
 import io.ktor.http.userAgent
 import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.errors.IOException
+import io.ktor.utils.io.readRemaining
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -60,8 +69,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -69,17 +80,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.io.readByteArray
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.concurrent.Volatile
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 @OptIn(ExperimentalAtomicApi::class)
 class InnerTube(
@@ -108,10 +125,12 @@ class InnerTube(
         private const val API_BASE_STUDIO = "$ORIGIN_STUDIO/youtubei/v1"
         private const val TV_BEARER_PLAYER_ENDPOINT = "$API_BASE_WWW/player"
         private const val TV_BEARER_TIMEOUT_MS = 8_000L
+        private const val MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
         private const val MAX_TV_BEARER_RESPONSE_BYTES = 4 * 1024 * 1024
 
         private val TRANSIENT_STATUS_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
         private const val MAX_RETRY_AFTER_MS = 5_000L
+        private const val MAX_STATS_RESPONSE_BYTES = 64 * 1024
         private val STATS_HOSTS = setOf("s.youtube.com", "www.youtube.com", "music.youtube.com")
         private val STATS_PATHS = setOf("/api/stats/playback", "/api/stats/watchtime")
         private val MEDIA_REQUEST_HEADERS =
@@ -124,9 +143,21 @@ class InnerTube(
         private val VISITOR_DATA_REGEX = Regex(""""(?:VISITOR_DATA|visitorData)"\s*:\s*"([^"]+)"""")
         private const val MAX_UPLOAD_START_RESPONSE_BYTES = 64 * 1024
         private const val MAX_IMAGE_UPLOAD_RESPONSE_BYTES = 64 * 1024
+        private val IMAGE_UPLOAD_JSON = Json { ignoreUnknownKeys = true }
         private const val MAX_UPLOAD_BYTES = 300L * 1024 * 1024
+        private const val VISITOR_FETCH_TIMEOUT_MS = 15_000L
+        private const val SERVICE_WORKER_VISITOR_TIMEOUT_MS = 4_000L
+        private const val FIELD_MASK_HEADER = "X-Goog-FieldMask"
+        private val VISITOR_FAILURE_COOLDOWN = 30.seconds
         private const val MAX_VISITOR_RESPONSE_BYTES = 4 * 1024 * 1024
     }
+
+    // These requests are POSTs. Replace even an explicitly installed caller redirect policy.
+    private val postClient =
+        httpClient.config {
+            followRedirects = false
+            installOrReplace(HttpRedirect) { checkHttpMethod = true }
+        }
 
     /** Immutable request identity. Contains credentials and must not be serialized or logged directly. */
     data class SessionSnapshot(
@@ -174,6 +205,10 @@ class InnerTube(
     private val visitorDataFetchMutex = Mutex()
     private val visitorDataScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var visitorDataFlight: VisitorDataFlight? = null
+
+    @Volatile
+    private var playerFieldMaskEnabled = true
+    private var visitorDataFailure: Pair<SessionSnapshot, TimeSource.Monotonic.ValueTimeMark>? = null
     private val sessionBoundRequests = AtomicReference<List<SessionBoundRequest>>(emptyList())
 
     var locale: YouTubeLocale
@@ -228,6 +263,7 @@ class InnerTube(
      */
     fun close() {
         visitorDataScope.cancel()
+        postClient.close()
         while (true) {
             val requests = sessionBoundRequests.load()
             if (sessionBoundRequests.compareAndSet(requests, emptyList())) {
@@ -253,9 +289,7 @@ class InnerTube(
         visitorData: String,
     ): SessionSnapshot? {
         val current = session.load()
-        return current.takeIf {
-            expected.copy(visitorData = visitorData, generation = current.generation) == current
-        }
+        return current.takeIf { it.visitorData == visitorData && sessionIsCompatible(expected, it) }
     }
 
     fun clearSessionIfMatches(expected: SessionSnapshot): Boolean =
@@ -286,19 +320,31 @@ class InnerTube(
             if (published.generation >= versioned.generation) break
             if (mutableSessionFlow.compareAndSet(published, versioned)) break
         }
-        cancelStaleSessionRequests(versioned.generation)
+        cancelStaleSessionRequests(versioned)
         return true
     }
 
-    private fun cancelStaleSessionRequests(currentGeneration: Long) {
+    private fun sessionIsCompatible(
+        expected: SessionSnapshot,
+        current: SessionSnapshot,
+    ): Boolean =
+        expected.generation == current.generation ||
+            (
+                expected.visitorData == null && current.visitorData != null &&
+                    current.generation == expected.generation + 1 &&
+                    expected.copy(visitorData = current.visitorData, generation = current.generation) == current
+            )
+
+    private fun cancelStaleSessionRequests(current: SessionSnapshot) {
         while (true) {
             val requests = sessionBoundRequests.load()
-            val active = requests.filter { it.session.generation >= currentGeneration }
+            val (active, stale) =
+                requests.partition {
+                    it.session.generation > current.generation ||
+                        sessionIsCompatible(it.session, current)
+                }
             if (!sessionBoundRequests.compareAndSet(requests, active)) continue
-            requests
-                .asSequence()
-                .filter { it.session.generation < currentGeneration }
-                .forEach { it.job.cancel(CancellationException("InnerTube session changed")) }
+            stale.forEach { it.job.cancel(CancellationException("InnerTube session changed")) }
             return
         }
     }
@@ -306,24 +352,28 @@ class InnerTube(
     private suspend fun <T> withSessionBoundRequest(
         requestSession: SessionSnapshot,
         block: suspend () -> T,
-    ): T {
-        val job = currentCoroutineContext()[Job] ?: return block()
-        val request = SessionBoundRequest(requestSession, job)
-        while (true) {
-            if (session.load().generation != requestSession.generation) throw CancellationException("InnerTube session changed")
-            val requests = sessionBoundRequests.load()
-            if (sessionBoundRequests.compareAndSet(requests, requests + request)) break
-        }
-        try {
-            if (session.load().generation != requestSession.generation) throw CancellationException("InnerTube session changed")
-            return block()
-        } finally {
+    ): T =
+        coroutineScope {
+            val job = currentCoroutineContext()[Job]!!
+            val request = SessionBoundRequest(requestSession, job)
             while (true) {
+                if (!sessionIsCompatible(requestSession, session.load())) throw CancellationException("InnerTube session changed")
                 val requests = sessionBoundRequests.load()
-                if (request !in requests || sessionBoundRequests.compareAndSet(requests, requests - request)) break
+                if (sessionBoundRequests.compareAndSet(requests, requests + request)) break
+            }
+            try {
+                if (!sessionIsCompatible(requestSession, session.load())) throw CancellationException("InnerTube session changed")
+                val result = block()
+                currentCoroutineContext().ensureActive()
+                if (!sessionIsCompatible(requestSession, session.load())) throw CancellationException("InnerTube session changed")
+                result
+            } finally {
+                while (true) {
+                    val requests = sessionBoundRequests.load()
+                    if (request !in requests || sessionBoundRequests.compareAndSet(requests, requests - request)) break
+                }
             }
         }
-    }
 
     fun replaceSession(
         cookie: String?,
@@ -349,9 +399,9 @@ class InnerTube(
 
     private fun resolveSapisidValue(cookie: String?): String? {
         val cookieMap = cookie?.let(::parseCookieString).orEmpty()
-        return cookieMap["SAPISID"]
-            ?: cookieMap["__Secure-3PAPISID"]
-            ?: cookieMap["__Secure-1PAPISID"]
+        return cookieMap["SAPISID"]?.takeIf { it.isNotBlank() }
+            ?: cookieMap["__Secure-3PAPISID"]?.takeIf { it.isNotBlank() }
+            ?: cookieMap["__Secure-1PAPISID"]?.takeIf { it.isNotBlank() }
     }
 
     private fun sapisidAuthHeader(
@@ -440,9 +490,7 @@ class InnerTube(
                 append("X-Goog-AuthUser", session.authUser)
                 val sapisid = session.sapisid
                 if (!sapisid.isNullOrBlank()) {
-                    val currentTime = Clock.System.now().toEpochMilliseconds() / 1000
-                    val sapisidHash = sha1("$currentTime $sapisid $origin")
-                    append("Authorization", "SAPISIDHASH ${currentTime}_$sapisidHash")
+                    sapisidAuthHeader(origin, sapisid)?.let { append(HttpHeaders.Authorization, it) }
                 }
             }
         }
@@ -452,8 +500,77 @@ class InnerTube(
         userAgent(client.userAgent)
     }
 
+    private suspend fun <T> withNoRedirects(block: suspend (HttpClient) -> T): T {
+        val directClient =
+            HttpClient(httpClient.engine) {
+                expectSuccess = false
+                followRedirects = false
+                install(HttpTimeout) {
+                    requestTimeoutMillis = 30_000L
+                    connectTimeoutMillis = 10_000L
+                    socketTimeoutMillis = 10_000L
+                }
+            }
+        return try {
+            block(directClient)
+        } finally {
+            directClient.close()
+        }
+    }
+
+    /** [keepErrorBody] = false skips downloading non-2xx bodies; use it only where callers never read them. */
+    private suspend fun HttpClient.postBounded(
+        url: String,
+        maxBytes: Int = MAX_API_RESPONSE_BYTES,
+        keepErrorBody: Boolean = true,
+        block: HttpRequestBuilder.() -> Unit,
+    ): HttpResponse =
+        preparePost(url) {
+            block()
+            expectSuccess = false
+        }.executeBounded(maxBytes, keepErrorBody)
+
+    private suspend fun HttpClient.getBounded(
+        url: String,
+        maxBytes: Int = MAX_API_RESPONSE_BYTES,
+        keepErrorBody: Boolean = true,
+        block: HttpRequestBuilder.() -> Unit,
+    ): HttpResponse =
+        prepareGet(url) {
+            block()
+            expectSuccess = false
+        }.executeBounded(maxBytes, keepErrorBody)
+
+    private suspend fun HttpStatement.executeBounded(
+        maxBytes: Int,
+        keepErrorBody: Boolean,
+    ): HttpResponse =
+        execute { response ->
+            val channel = response.bodyAsChannel()
+            try {
+                if (!keepErrorBody && !response.status.isSuccess()) {
+                    // Status and Retry-After stay available; a slow error body no longer delays fallback.
+                    return@execute response.call
+                        .replaceResponse { ByteReadChannel.Empty }
+                        .save()
+                        .response
+                }
+                check((response.contentLength() ?: 0L) <= maxBytes) { "Response exceeded the $maxBytes byte limit" }
+                val bytes = channel.readRemaining(maxBytes.toLong() + 1).readByteArray()
+                check(bytes.size <= maxBytes) { "Response exceeded the $maxBytes byte limit" }
+                // Preserve replayable HttpResponse bodies without saving an unbounded network stream.
+                response.call
+                    .replaceResponse { ByteReadChannel(bytes) }
+                    .save()
+                    .response
+            } finally {
+                channel.cancel(null)
+            }
+        }
+
     private suspend fun executeRequest(
         operation: String = "request",
+        requestSession: SessionSnapshot? = null,
         retryTransientFailures: Boolean = true,
         requireSuccess: Boolean = true,
         maxAttempts: Int = 3,
@@ -461,10 +578,16 @@ class InnerTube(
         factor: Double = 2.0,
         block: suspend () -> HttpResponse,
     ): HttpResponse {
+        if (requestSession != null) {
+            return withSessionBoundRequest(requestSession) {
+                executeRequest(operation, null, retryTransientFailures, requireSuccess, maxAttempts, initialDelay, factor, block)
+            }
+        }
         var currentDelay = initialDelay
         var attempt = 0
         while (true) {
             try {
+                currentCoroutineContext().ensureActive()
                 val response = block()
                 // A 429 is only retried when the server says how long to wait, and not for long.
                 val retryAfterMs =
@@ -479,7 +602,7 @@ class InnerTube(
                 val retryableStatus =
                     response.status.value in TRANSIENT_STATUS_CODES && (response.status.value != 429 || retryAfterMs != null)
                 if (!retryTransientFailures || !retryableStatus || attempt + 1 >= maxAttempts) {
-                    if (attempt > 0 && !retryableStatus) {
+                    if (attempt > 0 && response.status.isSuccess()) {
                         logger.w(TAG, "$operation succeeded on retry ${attempt + 1}/$maxAttempts")
                     }
                     if (requireSuccess && response.status.value !in 200..299) {
@@ -502,7 +625,7 @@ class InnerTube(
                 throw e
             } catch (e: Exception) {
                 attempt++
-                if (!retryTransientFailures || attempt >= maxAttempts) {
+                if (!retryTransientFailures || (e !is IOException && e !is HttpRequestTimeoutException) || attempt >= maxAttempts) {
                     logger.w(TAG, "$operation failed after $attempt attempts (${e.logType()})")
                     throw e
                 }
@@ -538,8 +661,11 @@ class InnerTube(
         val requestSession = sessionSnapshot()
         val setLoginForRequest = setLogin || requestSession.useLoginForBrowse
         val visitorDataForRequest = requestSession.visitorData.takeUnless { requestSession.regionOverrideActive }
-        return executeRequest(operation = "browse") {
-            httpClient.post("browse") {
+        return executeRequest(
+            operation = "browse",
+            requestSession = requestSession.takeIf { setLoginForRequest && client.loginSupported },
+        ) {
+            postClient.postBounded("browse", keepErrorBody = false) {
                 ytClient(
                     client,
                     requestSession,
@@ -573,7 +699,7 @@ class InnerTube(
         requestVisitorData: String? = null,
         encryptedHostFlags: String? = null,
     ): HttpResponse =
-        playerWithSession(
+        playerWithSessionBound(
             client,
             videoId,
             playlistId,
@@ -582,6 +708,42 @@ class InnerTube(
             requestVisitorData,
             sessionSnapshot(),
             encryptedHostFlags,
+        )
+
+    private fun YouTubeClient.withLanguage(language: String): YouTubeClient =
+        if ("{language}" in userAgent) copy(userAgent = userAgent.replace("{language}", language)) else this
+
+    private fun buildPlayerBody(
+        client: YouTubeClient,
+        context: Context,
+        videoId: String,
+        signatureTimestamp: Int?,
+        playlistId: String? = null,
+        poToken: String? = null,
+        encryptedHostFlags: String? = null,
+        thirdParty: PlayerBody.ThirdParty? = null,
+    ): PlayerBody =
+        PlayerBody(
+            context = context,
+            videoId = videoId,
+            playlistId = playlistId,
+            playbackContext =
+                if (client.useSignatureTimestamp || client.isEmbedded) {
+                    PlayerBody.PlaybackContext(
+                        PlayerBody.PlaybackContext.ContentPlaybackContext(
+                            html5Preference = "HTML5_PREF_WANTS".takeUnless { client.useMusicPlayerEndpoint },
+                            signatureTimestamp = signatureTimestamp.takeIf { client.useSignatureTimestamp },
+                            encryptedHostFlags = encryptedHostFlags.takeIf { client.isEmbedded },
+                        ),
+                    )
+                } else {
+                    null
+                },
+            thirdParty = thirdParty,
+            serviceIntegrityDimensions = poToken?.let { PlayerBody.ServiceIntegrityDimensions(it) },
+            contentCheckOk = true,
+            racyCheckOk = true,
+            videoCheckOk = true.takeUnless { client.useMusicPlayerEndpoint },
         )
 
     internal suspend fun playerWithSession(
@@ -594,76 +756,139 @@ class InnerTube(
         requestSession: SessionSnapshot,
         encryptedHostFlags: String? = null,
         retryTransientFailures: Boolean = true,
-    ): HttpResponse {
-        val visitorDataForRequest = requestVisitorData ?: requestSession.visitorData
-        val requestClient =
-            if ("{language}" in client.userAgent) {
-                client.copy(userAgent = client.userAgent.replace("{language}", requestSession.locale.hl))
-            } else {
-                client
-            }
-        return executeRequest(operation = "player:${client.clientName}", retryTransientFailures = retryTransientFailures) {
-            val startTime = Clock.System.now().toEpochMilliseconds()
-            val hasCookie = !requestSession.cookie.isNullOrBlank()
-            val hasSapisid = !requestSession.sapisid.isNullOrBlank()
-            val authHeaderEligible = client.loginSupported
-            val hasDataSync = !requestSession.dataSyncId.isNullOrBlank()
-            logger.d(
-                TAG,
-                "player request client=${client.clientName} version=${client.clientVersion} " +
-                    "poToken=${poToken != null} sts=${signatureTimestamp != null} " +
-                    "loginSupported=${client.loginSupported} loginRequired=${client.loginRequired} " +
-                    "hasCookie=$hasCookie hasSapisid=$hasSapisid authEligible=$authHeaderEligible hasDataSync=$hasDataSync",
-            )
-            val response =
-                httpClient.post("player") {
-                    ytClient(requestClient, requestSession, setLogin = true, visitorData = visitorDataForRequest)
-                    setBody(
-                        PlayerBody(
-                            context =
-                                requestClient.toContext(
-                                    requestSession.locale,
-                                    visitorDataForRequest,
-                                    requestSession.dataSyncId.takeIf { client.loginSupported },
-                                ),
-                            videoId = videoId,
-                            playlistId = playlistId,
-                            playbackContext =
-                                if (client.useSignatureTimestamp || client.isEmbedded) {
-                                    PlayerBody.PlaybackContext(
-                                        PlayerBody.PlaybackContext.ContentPlaybackContext(
-                                            html5Preference =
-                                                "HTML5_PREF_WANTS".takeUnless { client.useMusicPlayerEndpoint },
-                                            signatureTimestamp = signatureTimestamp.takeIf { client.useSignatureTimestamp },
-                                            encryptedHostFlags = encryptedHostFlags.takeIf { client.isEmbedded },
-                                        ),
-                                    )
-                                } else {
-                                    null
-                                },
-                            thirdParty =
-                                if (client.isEmbedded) {
-                                    PlayerBody.ThirdParty(embedUrl = "https://www.youtube.com/embed/$videoId")
-                                } else {
-                                    null
-                                },
-                            serviceIntegrityDimensions =
-                                if (poToken != null) {
-                                    PlayerBody.ServiceIntegrityDimensions(poToken)
-                                } else {
-                                    null
-                                },
-                            contentCheckOk = true,
-                            racyCheckOk = true,
-                            videoCheckOk = true.takeUnless { client.useMusicPlayerEndpoint },
-                        ),
+    ): HttpResponse =
+        executeRequest(operation = "player:${client.clientName}", retryTransientFailures = retryTransientFailures) {
+            timedPlayerRequest(client) {
+                postClient.postBounded("player", keepErrorBody = false) {
+                    playerRequest(
+                        client,
+                        videoId,
+                        playlistId,
+                        signatureTimestamp,
+                        poToken,
+                        requestVisitorData,
+                        requestSession,
+                        encryptedHostFlags,
                     )
-                    userAgent(requestClient.userAgent)
                 }
-            val elapsed = Clock.System.now().toEpochMilliseconds() - startTime
-            logger.d(TAG, "player response client=${client.clientName} elapsed=${elapsed}ms")
-            response
+            }
         }
+
+    /**
+     * Extraction-only player request: no transient retries, status checked before the body is read, and the bounded
+     * body is decoded once instead of being saved into a replayable response first.
+     */
+    internal suspend fun playerTextWithSessionBound(
+        client: YouTubeClient,
+        videoId: String,
+        signatureTimestamp: Int?,
+        poToken: String?,
+        requestSession: SessionSnapshot,
+        encryptedHostFlags: String?,
+        maxBytes: Int,
+    ): String =
+        withSessionBoundRequest(requestSession) {
+            timedPlayerRequest(client) {
+                val masked = playerFieldMaskEnabled
+                try {
+                    extractionPlayerText(client, videoId, signatureTimestamp, poToken, requestSession, encryptedHostFlags, maxBytes, masked)
+                } catch (e: InnerTubeHttpException) {
+                    if (!masked || e.status != HttpStatusCode.BadRequest) throw e
+                    // A schema change could invalidate the mask; never let that break playback.
+                    extractionPlayerText(
+                        client,
+                        videoId,
+                        signatureTimestamp,
+                        poToken,
+                        requestSession,
+                        encryptedHostFlags,
+                        maxBytes,
+                        false,
+                    ).also {
+                        playerFieldMaskEnabled = false
+                        logger.w(TAG, "player field mask rejected, disabled for this instance")
+                    }
+                }
+            }
+        }
+
+    private suspend fun extractionPlayerText(
+        client: YouTubeClient,
+        videoId: String,
+        signatureTimestamp: Int?,
+        poToken: String?,
+        requestSession: SessionSnapshot,
+        encryptedHostFlags: String?,
+        maxBytes: Int,
+        fieldMask: Boolean,
+    ): String =
+        postClient
+            .preparePost("player") {
+                playerRequest(client, videoId, null, signatureTimestamp, poToken, null, requestSession, encryptedHostFlags)
+                // Asks the server for only what PlayerResponse decodes: about half the bytes to transfer and parse.
+                if (fieldMask) {
+                    val mask = if (client.clientName == "TVHTML5") PLAYER_RESPONSE_TV_FIELD_MASK else PLAYER_RESPONSE_FIELD_MASK
+                    header(FIELD_MASK_HEADER, mask)
+                }
+                expectSuccess = false
+            }.execute { response ->
+                if (!response.status.isSuccess()) {
+                    response.bodyAsChannel().cancel(null)
+                    throw InnerTubeHttpException("player:${client.clientName}", response.status)
+                }
+                response.bodyAsTextLimited(maxBytes)
+            }
+
+    private inline fun <T> timedPlayerRequest(
+        client: YouTubeClient,
+        block: () -> T,
+    ): T {
+        val startTime = Clock.System.now().toEpochMilliseconds()
+        val result = block()
+        val elapsed = Clock.System.now().toEpochMilliseconds() - startTime
+        logger.d(TAG, "player response client=${client.clientName} elapsed=${elapsed}ms")
+        return result
+    }
+
+    private fun HttpRequestBuilder.playerRequest(
+        client: YouTubeClient,
+        videoId: String,
+        playlistId: String?,
+        signatureTimestamp: Int?,
+        poToken: String?,
+        requestVisitorData: String?,
+        requestSession: SessionSnapshot,
+        encryptedHostFlags: String?,
+    ) {
+        val visitorDataForRequest = requestVisitorData ?: requestSession.visitorData
+        val requestClient = client.withLanguage(requestSession.locale.hl)
+        logger.d(
+            TAG,
+            "player request client=${client.clientName} version=${client.clientVersion} " +
+                "poToken=${poToken != null} sts=${signatureTimestamp != null} " +
+                "loginSupported=${client.loginSupported} loginRequired=${client.loginRequired} " +
+                "hasCookie=${!requestSession.cookie.isNullOrBlank()} hasSapisid=${!requestSession.sapisid.isNullOrBlank()} " +
+                "authEligible=${client.loginSupported} hasDataSync=${!requestSession.dataSyncId.isNullOrBlank()}",
+        )
+        ytClient(requestClient, requestSession, setLogin = true, visitorData = visitorDataForRequest)
+        setBody(
+            buildPlayerBody(
+                client = requestClient,
+                context =
+                    requestClient.toContext(
+                        requestSession.locale,
+                        visitorDataForRequest,
+                        requestSession.dataSyncId.takeIf { client.loginSupported },
+                    ),
+                videoId = videoId,
+                signatureTimestamp = signatureTimestamp,
+                playlistId = playlistId,
+                poToken = poToken,
+                encryptedHostFlags = encryptedHostFlags,
+                thirdParty = if (client.isEmbedded) PlayerBody.ThirdParty("https://www.youtube.com/embed/$videoId") else null,
+            ),
+        )
+        userAgent(requestClient.userAgent)
     }
 
     suspend fun mediaContentLength(
@@ -672,13 +897,17 @@ class InnerTube(
     ): Long? =
         try {
             val mediaUrl = validatedMediaUrl(url)
-            httpClient
-                .head(mediaUrl) {
-                    requestHeaders.forEach { (name, value) ->
-                        if (name.lowercase() in MEDIA_REQUEST_HEADERS) header(name, value)
+            withNoRedirects { directClient ->
+                directClient
+                    .prepareHead(mediaUrl) {
+                        expectSuccess = false
+                        requestHeaders.forEach { (name, value) ->
+                            if (name.lowercase() in MEDIA_REQUEST_HEADERS) header(name, value)
+                        }
+                    }.execute { response ->
+                        response.contentLength()?.takeIf { response.status.isSuccess() && it > 0L }
                     }
-                }.contentLength()
-                ?.takeIf { it > 0L }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -748,33 +977,13 @@ class InnerTube(
             require(bearerToken.length in 1..4096 && bearerToken.all { it.code in 0x21..0x7e }) {
                 "TV bearer credential is not header-safe"
             }
-            val requestClient =
-                if ("{language}" in client.userAgent) {
-                    client.copy(userAgent = client.userAgent.replace("{language}", requestSession.locale.hl))
-                } else {
-                    client
-                }
+            val requestClient = client.withLanguage(requestSession.locale.hl)
             val body =
-                PlayerBody(
+                buildPlayerBody(
+                    client = requestClient,
                     context = requestClient.toContext(requestSession.locale, requestSession.visitorData, null),
                     videoId = videoId,
-                    playlistId = null,
-                    playbackContext =
-                        if (requestClient.useSignatureTimestamp || requestClient.isEmbedded) {
-                            PlayerBody.PlaybackContext(
-                                PlayerBody.PlaybackContext.ContentPlaybackContext(
-                                    html5Preference = "HTML5_PREF_WANTS".takeUnless { requestClient.useMusicPlayerEndpoint },
-                                    signatureTimestamp = signatureTimestamp.takeIf { requestClient.useSignatureTimestamp },
-                                ),
-                            )
-                        } else {
-                            null
-                        },
-                    thirdParty = null,
-                    serviceIntegrityDimensions = null,
-                    contentCheckOk = true,
-                    racyCheckOk = true,
-                    videoCheckOk = true.takeUnless { requestClient.useMusicPlayerEndpoint },
+                    signatureTimestamp = signatureTimestamp,
                 )
             val directClient =
                 HttpClient(httpClient.engine) {
@@ -784,7 +993,7 @@ class InnerTube(
                 }
             try {
                 val response =
-                    directClient.post(TV_BEARER_PLAYER_ENDPOINT) {
+                    directClient.postBounded(TV_BEARER_PLAYER_ENDPOINT, keepErrorBody = false) {
                         contentType(ContentType.Application.Json)
                         headers {
                             append("X-Goog-Api-Format-Version", "1")
@@ -828,8 +1037,8 @@ class InnerTube(
     ): HttpResponse {
         val requestSession = sessionSnapshot()
         val setLoginForRequest = requestSession.useLoginForBrowse
-        return executeRequest(operation = "next") {
-            httpClient.post("next") {
+        return executeRequest(operation = "next", requestSession = requestSession.takeIf { setLoginForRequest && client.loginSupported }) {
+            postClient.postBounded("next", keepErrorBody = false) {
                 ytClient(
                     client,
                     requestSession,
@@ -850,6 +1059,8 @@ class InnerTube(
                         index = index,
                         params = params,
                         continuation = continuation,
+                        contentCheckOk = true,
+                        racyCheckOk = true,
                     ),
                 )
             }
@@ -942,49 +1153,49 @@ class InnerTube(
         val statsUrl = validatedStatsUrl(url)
         return withSessionBoundRequest(requestSession) {
             executeRequest(operation = operation, retryTransientFailures = false, requireSuccess = false) {
-                httpClient.get(statsUrl) {
-                    userAgent(client.userAgent)
-                    headers {
-                        append("X-Goog-Api-Format-Version", "1")
-                        append("X-YouTube-Client-Name", client.clientId)
-                        append("X-YouTube-Client-Version", client.clientVersion)
-                        append("Origin", origin)
-                        append("X-Origin", origin)
-                        append("Referer", if (client.clientName == "WEB_REMIX") REFERER_MUSIC else REFERER_WWW)
-                        append(
-                            "Accept-Language",
-                            requestSession.locale.acceptLanguageHeader(),
-                        )
-                        append("Cache-Control", "no-cache")
-                        append("Content-Type", "application/json")
-                        requestSession.visitorData?.let { append("X-Goog-Visitor-Id", it) }
-                        if (client.loginSupported) {
-                            requestSession.cookie?.let { cookieValue ->
-                                append("Cookie", cookieValue)
-                                append("X-Goog-AuthUser", requestSession.authUser)
-                                val sapisid = requestSession.sapisid
-                                if (!sapisid.isNullOrBlank()) {
-                                    val currentTime = Clock.System.now().toEpochMilliseconds() / 1000
-                                    val sapisidHash = sha1("$currentTime $sapisid $origin")
-                                    append("Authorization", "SAPISIDHASH ${currentTime}_$sapisidHash")
+                withNoRedirects { directClient ->
+                    directClient.getBounded(statsUrl.toString(), MAX_STATS_RESPONSE_BYTES) {
+                        userAgent(client.userAgent)
+                        headers {
+                            append("X-Goog-Api-Format-Version", "1")
+                            append("X-YouTube-Client-Name", client.clientId)
+                            append("X-YouTube-Client-Version", client.clientVersion)
+                            append("Origin", origin)
+                            append("X-Origin", origin)
+                            append("Referer", if (client.clientName == "WEB_REMIX") REFERER_MUSIC else REFERER_WWW)
+                            append(
+                                "Accept-Language",
+                                requestSession.locale.acceptLanguageHeader(),
+                            )
+                            append("Cache-Control", "no-cache")
+                            append("Content-Type", "application/json")
+                            requestSession.visitorData?.let { append("X-Goog-Visitor-Id", it) }
+                            if (client.loginSupported) {
+                                requestSession.cookie?.let { cookieValue ->
+                                    append("Cookie", cookieValue)
+                                    append("X-Goog-AuthUser", requestSession.authUser)
+                                    val sapisid = requestSession.sapisid
+                                    if (!sapisid.isNullOrBlank()) {
+                                        sapisidAuthHeader(origin, sapisid)?.let { append(HttpHeaders.Authorization, it) }
+                                    }
                                 }
                             }
                         }
-                    }
-                    url {
-                        parameters.append("prettyPrint", "false")
-                        parameters.append("ver", "2")
-                        parameters.append("c", client.clientName)
-                        parameters.remove("cpn")
-                        parameters.append("cpn", cpn)
-                        startTimes?.let { parameters.append("st", it) }
-                        endTimes?.let { parameters.append("et", it) }
-                        currentMediaTime?.let { parameters.append("cmt", it) }
-                        realTime?.let { parameters.append("rt", it) }
-                        final?.let { parameters.append("final", if (it) "1" else "0") }
-                        format?.let { parameters.append("fmt", it.toString()) }
-                        if (playlistId != null) {
-                            parameters.append("list", playlistId)
+                        url {
+                            parameters.append("prettyPrint", "false")
+                            parameters.append("ver", "2")
+                            parameters.append("c", client.clientName)
+                            parameters.remove("cpn")
+                            parameters.append("cpn", cpn)
+                            startTimes?.let { parameters.append("st", it) }
+                            endTimes?.let { parameters.append("et", it) }
+                            currentMediaTime?.let { parameters.append("cmt", it) }
+                            realTime?.let { parameters.append("rt", it) }
+                            final?.let { parameters.append("final", if (it) "1" else "0") }
+                            format?.let { parameters.append("fmt", it.toString()) }
+                            if (playlistId != null) {
+                                parameters.append("list", playlistId)
+                            }
                         }
                     }
                 }
@@ -1030,8 +1241,11 @@ class InnerTube(
         val requestSession = sessionSnapshot()
         val setLoginForRequest = setLogin ?: true
         val visitorDataForRequest = requestSession.visitorData.takeUnless { requestSession.regionOverrideActive }
-        return executeRequest(operation = "search") {
-            httpClient.post("search") {
+        return executeRequest(
+            operation = "search",
+            requestSession = requestSession.takeIf { setLoginForRequest && client.loginSupported },
+        ) {
+            postClient.postBounded("search", keepErrorBody = false) {
                 ytClient(
                     client,
                     requestSession,
@@ -1065,8 +1279,11 @@ class InnerTube(
         setLogin: Boolean = false,
     ): HttpResponse {
         val requestSession = sessionSnapshot()
-        return executeRequest(operation = "getSearchSuggestions") {
-            httpClient.post("music/get_search_suggestions") {
+        return executeRequest(
+            operation = "getSearchSuggestions",
+            requestSession = requestSession.takeIf { setLogin && client.loginSupported },
+        ) {
+            postClient.postBounded("music/get_search_suggestions", keepErrorBody = false) {
                 ytClient(client, requestSession, setLogin = setLogin, includeAccountCookies = setLogin)
                 setBody(
                     GetSearchSuggestionsBody(
@@ -1089,7 +1306,7 @@ class InnerTube(
     ): HttpResponse {
         val requestSession = sessionSnapshot()
         return executeMutation("feedback", requestSession) { session ->
-            httpClient.post("feedback") {
+            postClient.postBounded("feedback") {
                 ytClient(client, session, setLogin = true)
                 setBody(
                     FeedbackBody(
@@ -1108,8 +1325,11 @@ class InnerTube(
     ): HttpResponse {
         val requestSession = sessionSnapshot()
         val setLoginForRequest = requestSession.useLoginForBrowse
-        return executeRequest(operation = "getQueue") {
-            httpClient.post("music/get_queue") {
+        return executeRequest(
+            operation = "getQueue",
+            requestSession = requestSession.takeIf { setLoginForRequest && client.loginSupported },
+        ) {
+            postClient.postBounded("music/get_queue", keepErrorBody = false) {
                 ytClient(
                     client,
                     requestSession,
@@ -1139,7 +1359,7 @@ class InnerTube(
     ): HttpResponse {
         val requestSession = sessionSnapshot()
         return executeRequest(operation = "getTranscript") {
-            httpClient.post("https://music.youtube.com/youtubei/v1/get_transcript") {
+            postClient.postBounded("https://music.youtube.com/youtubei/v1/get_transcript", keepErrorBody = false) {
                 // YouTube Music's public web-client key, not an application credential.
                 parameter("key", TRANSCRIPT_API_KEY)
                 headers {
@@ -1160,8 +1380,8 @@ class InnerTube(
 
     suspend fun accountMenu(client: YouTubeClient): HttpResponse {
         val requestSession = sessionSnapshot()
-        return executeRequest(operation = "accountMenu", requireSuccess = false) {
-            httpClient.post("account/account_menu") {
+        return executeRequest(operation = "accountMenu", requestSession = requestSession, requireSuccess = false) {
+            postClient.postBounded("account/account_menu") {
                 ytClient(client, requestSession, setLogin = true)
                 setBody(
                     AccountMenuBody(
@@ -1174,12 +1394,14 @@ class InnerTube(
 
     suspend fun accountsList(client: YouTubeClient): HttpResponse {
         val requestSession = sessionSnapshot()
-        return executeRequest(operation = "accountsList", requireSuccess = false) {
-            httpClient.post("account/accounts_list") {
+        return executeRequest(operation = "accountsList", requestSession = requestSession, requireSuccess = false) {
+            postClient.postBounded("account/accounts_list") {
                 ytClient(client, requestSession, setLogin = true)
                 setBody(
                     AccountsListBody(
                         context = client.toContext(requestSession.locale, requestSession.visitorData, null),
+                        requestType = "ACCOUNTS_LIST_REQUEST_TYPE_CHANNEL_SWITCHER",
+                        callCircumstance = "SWITCHING_USERS_FULL",
                     ),
                 )
             }
@@ -1216,7 +1438,10 @@ class InnerTube(
         return withSessionBoundRequest(requestSession) {
             val startResponse =
                 executeRequest(operation = "uploadSong:start", retryTransientFailures = false, requireSuccess = false) {
-                    httpClient.post("https://upload.youtube.com/upload/usermusic/http?authuser=${requestSession.authUser}") {
+                    postClient.postBounded(
+                        "https://upload.youtube.com/upload/usermusic/http?authuser=${requestSession.authUser}",
+                        MAX_UPLOAD_START_RESPONSE_BYTES,
+                    ) {
                         uploadAuthHeaders(requestSession)
                         header("X-Goog-Upload-Command", "start")
                         header("X-Goog-Upload-Header-Content-Length", contentLength.toString())
@@ -1235,7 +1460,7 @@ class InnerTube(
             check(startResponse.status.isSuccess()) { "Upload session start failed with HTTP ${startResponse.status.value}" }
             val validatedUploadUrl = validatedUploadUrl(checkNotNull(uploadUrl) { "Missing upload session URL" })
             executeRequest(operation = "uploadSong:finalize", retryTransientFailures = false, requireSuccess = false) {
-                httpClient.post(validatedUploadUrl) {
+                postClient.postBounded(validatedUploadUrl.toString(), MAX_UPLOAD_START_RESPONSE_BYTES) {
                     timeout {
                         requestTimeoutMillis = 600_000L
                         socketTimeoutMillis = 600_000L
@@ -1286,7 +1511,7 @@ class InnerTube(
         videoId: String,
         requestSession: SessionSnapshot,
     ) = executeMutation("likeVideo", requestSession) { requestSession ->
-        httpClient.post("like/like") {
+        postClient.postBounded("like/like") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 LikeBody(
@@ -1307,7 +1532,7 @@ class InnerTube(
         videoId: String,
         requestSession: SessionSnapshot,
     ) = executeMutation("unlikeVideo", requestSession) { requestSession ->
-        httpClient.post("like/removelike") {
+        postClient.postBounded("like/removelike") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 LikeBody(
@@ -1328,7 +1553,7 @@ class InnerTube(
         videoId: String,
         requestSession: SessionSnapshot,
     ) = executeMutation("dislikeVideo", requestSession) { requestSession ->
-        httpClient.post("like/dislike") {
+        postClient.postBounded("like/dislike") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 LikeBody(
@@ -1344,7 +1569,7 @@ class InnerTube(
         channelId: String,
         params: String? = null,
     ) = executeMutation("subscribeChannel") { requestSession ->
-        httpClient.post("subscription/subscribe") {
+        postClient.postBounded("subscription/subscribe") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 SubscribeBody(
@@ -1361,7 +1586,7 @@ class InnerTube(
         channelId: String,
         params: String? = null,
     ) = executeMutation("unsubscribeChannel") { requestSession ->
-        httpClient.post("subscription/unsubscribe") {
+        postClient.postBounded("subscription/unsubscribe") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 SubscribeBody(
@@ -1377,7 +1602,7 @@ class InnerTube(
         client: YouTubeClient,
         playlistId: String,
     ) = executeMutation("likePlaylist") { requestSession ->
-        httpClient.post("like/like") {
+        postClient.postBounded("like/like") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 LikeBody(
@@ -1398,7 +1623,7 @@ class InnerTube(
         playlistId: String,
         requestSession: SessionSnapshot,
     ) = executeMutation("unlikePlaylist", requestSession) { requestSession ->
-        httpClient.post("like/removelike") {
+        postClient.postBounded("like/removelike") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 LikeBody(
@@ -1414,7 +1639,7 @@ class InnerTube(
         playlistId: String,
         videoId: String,
     ) = executeMutation("addToPlaylist") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1431,7 +1656,7 @@ class InnerTube(
         playlistId: String,
         addedPlaylistId: String,
     ) = executeMutation("addPlaylistToPlaylist") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1449,7 +1674,7 @@ class InnerTube(
         setVideoId: String,
         successorSetVideoId: String?,
     ) = executeMutation("movePlaylistSong") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1467,7 +1692,7 @@ class InnerTube(
         setVideoId: String,
         videoId: String,
     ) = executeMutation("removePlaylistSong") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1484,7 +1709,7 @@ class InnerTube(
         playlistId: String,
         songs: List<Pair<String, String>>,
     ) = executeMutation("removePlaylistSongs") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1500,7 +1725,7 @@ class InnerTube(
         client: YouTubeClient,
         title: String,
     ) = executeMutation("createPlaylist") { requestSession ->
-        httpClient.post("playlist/create") {
+        postClient.postBounded("playlist/create") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 CreatePlaylistBody(
@@ -1517,7 +1742,7 @@ class InnerTube(
         playlistId: String,
         title: String,
     ) = executeMutation("renamePlaylist") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1534,7 +1759,7 @@ class InnerTube(
         playlistId: String,
         description: String,
     ) = executeMutation("setPlaylistDescription") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1555,8 +1780,11 @@ class InnerTube(
         val requestSession = sessionSnapshot()
         val startResponse =
             executeMutation("setPlaylistThumbnail:start", requestSession) { session ->
-                httpClient.post("https://music.youtube.com/playlist_image_upload/playlist_custom_thumbnail") {
-                    ytClient(client, session, setLogin = true)
+                postClient.postBounded(
+                    "https://music.youtube.com/playlist_image_upload/playlist_custom_thumbnail",
+                    MAX_IMAGE_UPLOAD_RESPONSE_BYTES,
+                ) {
+                    uploadAuthHeaders(session)
                     header("X-Goog-Upload-Command", "start")
                     header("X-Goog-Upload-Protocol", "resumable")
                     header("X-Goog-Upload-Header-Content-Length", image.size.toString())
@@ -1571,8 +1799,11 @@ class InnerTube(
 
         val uploadResponse =
             executeMutation("setPlaylistThumbnail:upload", requestSession) { session ->
-                httpClient.post("https://music.youtube.com/playlist_image_upload/playlist_custom_thumbnail") {
-                    ytClient(client, session, setLogin = true)
+                postClient.postBounded(
+                    "https://music.youtube.com/playlist_image_upload/playlist_custom_thumbnail",
+                    MAX_IMAGE_UPLOAD_RESPONSE_BYTES,
+                ) {
+                    uploadAuthHeaders(session)
                     parameter("upload_id", uploadId)
                     parameter("upload_protocol", "resumable")
                     header("X-Goog-Upload-Command", "upload, finalize")
@@ -1584,10 +1815,10 @@ class InnerTube(
         check(uploadResponse.status.isSuccess()) {
             "Playlist thumbnail upload failed with HTTP ${uploadResponse.status.value}"
         }
-        val encryptedBlobId = Json.decodeFromString<ImageUploadResponse>(uploadBody).encryptedBlobId
+        val encryptedBlobId = IMAGE_UPLOAD_JSON.decodeFromString<ImageUploadResponse>(uploadBody).encryptedBlobId
 
         return executeMutation("setPlaylistThumbnail:apply", requestSession) { session ->
-            httpClient.post("browse/edit_playlist") {
+            postClient.postBounded("browse/edit_playlist") {
                 ytClient(client, session, setLogin = true)
                 setBody(
                     EditPlaylistBody(
@@ -1604,7 +1835,7 @@ class InnerTube(
         client: YouTubeClient,
         playlistId: String,
     ) = executeMutation("removePlaylistThumbnail") { requestSession ->
-        httpClient.post("browse/edit_playlist") {
+        postClient.postBounded("browse/edit_playlist") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 EditPlaylistBody(
@@ -1626,7 +1857,7 @@ class InnerTube(
         playlistId: String,
         requestSession: SessionSnapshot,
     ) = executeMutation("deletePlaylist", requestSession) { requestSession ->
-        httpClient.post("playlist/delete") {
+        postClient.postBounded("playlist/delete") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 PlaylistDeleteBody(
@@ -1646,7 +1877,7 @@ class InnerTube(
         client: YouTubeClient,
         entityId: String,
     ) = executeMutation("deletePrivatelyOwnedEntity") { requestSession ->
-        httpClient.post("music/delete_privately_owned_entity") {
+        postClient.postBounded("music/delete_privately_owned_entity") {
             ytClient(client, requestSession, setLogin = true)
             setBody(
                 DeletePrivatelyOwnedEntityBody(
@@ -1665,35 +1896,52 @@ class InnerTube(
     ): String? {
         val deferred =
             visitorDataFetchMutex.withLock {
+                visitorDataScope.coroutineContext.ensureActive()
                 val currentSession = session.load()
                 if (!forceRefresh || requestSession != currentSession) {
+                    // Compatibility (not equality) so a caller holding the pre-publication snapshot still hits the
+                    // visitor a concurrent flight just published, which bumped the generation.
                     currentSession.visitorData
-                        ?.takeIf { visitorData ->
-                            visitorData.isNotBlank() && requestSession.copy(visitorData = visitorData) == currentSession
-                        }?.let { visitorData ->
+                        ?.takeIf { visitorData -> visitorData.isNotBlank() && sessionIsCompatible(requestSession, currentSession) }
+                        ?.let { visitorData ->
                             return@withLock CompletableDeferred<String?>().also { it.complete(visitorData) }
                         }
                 }
 
                 val sessionIdentity = requestSession.copy(visitorData = null)
+                // A just-failed bootstrap is not repeated for every tokenized client; an explicit refresh bypasses this.
+                visitorDataFailure
+                    ?.takeIf { !forceRefresh && it.first == sessionIdentity && it.second.elapsedNow() < VISITOR_FAILURE_COOLDOWN }
+                    ?.let { return@withLock CompletableDeferred<String?>().also { it.complete(null) } }
                 visitorDataFlight
-                    ?.takeIf { it.sessionIdentity == sessionIdentity }
+                    ?.takeIf { it.sessionIdentity == sessionIdentity && !it.result.isCompleted }
                     ?.result
                     ?: CompletableDeferred<String?>().also { result ->
                         visitorDataFlight = VisitorDataFlight(sessionIdentity, result)
-                        visitorDataScope.launch {
-                            try {
-                                result.complete(fetchFreshVisitorDataNetwork(requestSession))
-                            } catch (e: Throwable) {
-                                result.completeExceptionally(e)
-                            } finally {
+                        visitorDataScope
+                            .launch {
+                                val outcome =
+                                    runCatching { withTimeout(VISITOR_FETCH_TIMEOUT_MS) { fetchFreshVisitorDataNetwork(requestSession) } }
+                                // Retire the flight and publish its cooldown before waking waiters, so a resumed caller
+                                // sees the cooldown instead of starting another bootstrap. Only the owning flight may
+                                // touch the cooldown; an obsolete session's flight must not overwrite the current one.
                                 withContext(NonCancellable) {
                                     visitorDataFetchMutex.withLock {
-                                        if (visitorDataFlight?.result === result) visitorDataFlight = null
+                                        if (visitorDataFlight?.result === result) {
+                                            visitorDataFlight = null
+                                            outcome.onSuccess { visitorData ->
+                                                visitorDataFailure =
+                                                    sessionIdentity
+                                                        .takeIf { visitorData.isNullOrBlank() }
+                                                        ?.let { it to TimeSource.Monotonic.markNow() }
+                                            }
+                                        }
                                     }
                                 }
+                                outcome.fold(result::complete, result::completeExceptionally)
+                            }.invokeOnCompletion { cause ->
+                                if (cause != null) result.completeExceptionally(cause)
                             }
-                        }
                     }
             }
         return deferred.await()
@@ -1703,34 +1951,37 @@ class InnerTube(
         try {
             val startTime = Clock.System.now().toEpochMilliseconds()
             logger.d(TAG, "fetchFreshVisitorData start")
+            // The service worker gets its own deadline so a stall still leaves time for the homepage fallback.
             val serviceWorkerData =
-                try {
-                    val response =
-                        executeRequest(operation = "fetchFreshVisitorData", requireSuccess = false) {
-                            httpClient.get(VISITOR_DATA_URL) {
-                                header("User-Agent", YouTubeClient.USER_AGENT_WEB)
-                                header(HttpHeaders.Accept, "application/json,text/plain,*/*")
-                                header(
-                                    HttpHeaders.AcceptLanguage,
-                                    requestSession.locale.acceptLanguageHeader(),
-                                )
+                withTimeoutOrNull(SERVICE_WORKER_VISITOR_TIMEOUT_MS) {
+                    try {
+                        val response =
+                            executeRequest(operation = "fetchFreshVisitorData", retryTransientFailures = false, requireSuccess = false) {
+                                httpClient.getBounded(VISITOR_DATA_URL) {
+                                    header("User-Agent", YouTubeClient.USER_AGENT_WEB)
+                                    header(HttpHeaders.Accept, "application/json,text/plain,*/*")
+                                    header(
+                                        HttpHeaders.AcceptLanguage,
+                                        requestSession.locale.acceptLanguageHeader(),
+                                    )
+                                }
                             }
+                        if (response.status.value in 200..299) {
+                            sanitizeVisitorData(parseServiceWorkerVisitorData(response.bodyAsTextLimited(MAX_VISITOR_RESPONSE_BYTES)))
+                        } else {
+                            response.bodyAsChannel().cancel(null)
+                            null
                         }
-                    if (response.status.value in 200..299) {
-                        parseServiceWorkerVisitorData(response.bodyAsTextLimited(MAX_VISITOR_RESPONSE_BYTES))
-                    } else {
-                        response.bodyAsChannel().cancel(null)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        logger.d(TAG, "service-worker visitor data unavailable (${error.logType()})")
                         null
                     }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
-                    logger.d(TAG, "service-worker visitor data unavailable (${error.logType()})")
-                    null
                 }
             val data =
                 serviceWorkerData
-                    ?: fetchHomepageVisitorData(requestSession)
+                    ?: sanitizeVisitorData(fetchHomepageVisitorData(requestSession))
             if (!data.isNullOrBlank()) {
                 publishSession(requestSession, requestSession.copy(visitorData = data))
             }
@@ -1749,8 +2000,8 @@ class InnerTube(
 
     private suspend fun fetchHomepageVisitorData(requestSession: SessionSnapshot): String? {
         val response =
-            executeRequest(operation = "fetchFreshVisitorData", requireSuccess = false) {
-                httpClient.get(ORIGIN_MUSIC) {
+            executeRequest(operation = "fetchFreshVisitorData", requireSuccess = false, maxAttempts = 2) {
+                httpClient.getBounded(ORIGIN_MUSIC) {
                     header("User-Agent", YouTubeClient.USER_AGENT_WEB)
                     header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                     header(
@@ -1815,3 +2066,28 @@ private fun injectPrefCookie(
     val newPref = "PREF=${prefParts.joinToString("&")}"
     return (otherParts + newPref).joinToString("; ")
 }
+
+private const val PLAYER_FORMAT_FIELDS =
+    "itag,url,mimeType,bitrate,averageBitrate,width,height,contentLength,quality,audioQuality," +
+        "approxDurationMs,audioSampleRate,audioChannels,loudnessDb,lastModified,xtags,audioTrack,isDrc,signatureCipher," +
+        "drmFamilies,drmTrackType"
+
+/**
+ * Fields decoded by [PlayerResponse], plus DRM markers checked before decoding.
+ * The server answers 400 for any unknown path, so verify additions live: DRM names are valid only at these levels.
+ */
+internal const val PLAYER_RESPONSE_FIELD_MASK =
+    "playabilityStatus(status,reason,desktopLegacyAgeGateReason)," +
+        "streamingData(formats($PLAYER_FORMAT_FIELDS),adaptiveFormats($PLAYER_FORMAT_FIELDS)," +
+        "expiresInSeconds,hlsManifestUrl,dashManifestUrl,serverAbrStreamingUrl,drmParams,licenseInfos)," +
+        "videoDetails(videoId,title,author,channelId,lengthSeconds,musicVideoType,viewCount,thumbnail,isLiveContent)," +
+        "playbackTracking(videostatsPlaybackUrl,videostatsWatchtimeUrl,atrUrl," +
+        "videostatsScheduledFlushWalltimeSeconds,videostatsDefaultFlushIntervalSeconds)," +
+        "playerConfig(audioConfig(loudnessDb,perceptualLoudnessDb)," +
+        "mediaCommonConfig(mediaUstreamerRequestConfig(videoPlaybackUstreamerConfig)))"
+
+/** TV media stays forbidden during pre-roll ads, so TV alone also asks how long they run. */
+internal const val PLAYER_RESPONSE_TV_FIELD_MASK =
+    "$PLAYER_RESPONSE_FIELD_MASK," +
+        "adPlacements(adPlacementRenderer(config(adPlacementConfig(kind))," +
+        "renderer(instreamVideoAdRenderer(playerVars,skipOffsetMilliseconds))))"

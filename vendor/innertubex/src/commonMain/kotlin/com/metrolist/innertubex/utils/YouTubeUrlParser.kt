@@ -24,7 +24,7 @@ object YouTubeUrlParser {
         ) : ParsedUrl()
     }
 
-    private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "music.youtube.com", "www.music.youtube.com")
+    private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "www.music.youtube.com")
     private val musicHosts = setOf("music.youtube.com", "www.music.youtube.com")
     private val videoId = Regex("[a-zA-Z0-9_-]{11}")
     private val playlistId = Regex("[a-zA-Z0-9_-]+")
@@ -86,7 +86,14 @@ object YouTubeUrlParser {
     private fun parseUrl(value: String): Url? {
         val input = value.trim()
         if (input.isEmpty() || input.any(Char::isWhitespace)) return null
-        val candidate = if (input.startsWith("https://") || input.startsWith("http://")) input else "https://$input"
+        val candidate =
+            if (input.startsWith("https://", ignoreCase = true) ||
+                input.startsWith("http://", ignoreCase = true)
+            ) {
+                input
+            } else {
+                "https://$input"
+            }
         return runCatching { Url(candidate) }
             .getOrNull()
             ?.takeIf { it.protocol.name in setOf("http", "https") && !it.hasUserInfo() }
