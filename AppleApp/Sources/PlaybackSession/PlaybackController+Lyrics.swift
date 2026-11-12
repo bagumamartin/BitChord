@@ -17,6 +17,7 @@ extension PlaybackController {
         lyricsAlignmentTask = nil
         lyricsAligning = false
         lyricsAlignedLocally = nil
+        lyricsAlignmentState = .idle
         lyricsRequestGeneration &+= 1
         let requestGeneration = lyricsRequestGeneration
         lyricsNeedsDurationRefresh = false
@@ -104,6 +105,11 @@ extension PlaybackController {
         entry: QueueEntry,
         generation: UInt64
     ) {
+        lyricsAlignmentTask?.cancel()
+        lyricsAlignmentTask = nil
+        lyricsAligning = false
+        lyricsAlignedLocally = nil
+        lyricsAlignmentState = .idle
         lyrics = lines
         lyricsSourceLabel = label.isEmpty ? nil : label
         lyricsLoading = false
@@ -149,15 +155,37 @@ extension PlaybackController {
     func alignFetchedLyricsIfNeeded(
         _ lines: [LyricLineDto],
         for entry: QueueEntry,
-        requestGeneration: UInt64
+        requestGeneration: UInt64,
+        allowPermissionRequest: Bool = false,
+        useCache: Bool = true
     ) {
-        guard lines.contains(where: { !$0.isGap && $0.words.isEmpty }),
+        guard lines.contains(where: LyricsAudioAligner.needsWords),
               let source = loadedSourcePath,
               !source.isEmpty
-        else { return }
+        else { lyricsAlignmentState = .idle; return }
 
         let trackDuration = duration > 0 ? duration : entry.durationSeconds
-        guard trackDuration > 0 else { return }
+        guard trackDuration > 0 else { lyricsAlignmentState = .audioUnavailable; return }
+        let sourceURL = URL(fileURLWithPath: source)
+        let sourceAttributes = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let sourceIdentity = [
+            sourceURL.standardizedFileURL.path,
+            String(describing: sourceAttributes?[.size] ?? "unknown-size"),
+            String(describing: sourceAttributes?[.modificationDate] ?? "unknown-date")
+        ].joined(separator: "|")
+        let cacheKey = LyricsAlignmentCache.key(
+            trackId: entry.id, provider: lyricsSourceLabel, source: sourceIdentity, lines: lines
+        )
+        if useCache, let cached = LyricsAlignmentCache.value(for: cacheKey) {
+            lyrics = cached
+            let total = lines.filter(LyricsAudioAligner.needsWords).count
+            let timed = zip(lines, cached).filter { pair in
+                LyricsAudioAligner.needsWords(pair.0) && !pair.1.words.isEmpty
+            }.count
+            lyricsAlignedLocally = LyricsAudioAligner.Coverage(timed: timed, total: total)
+            lyricsAlignmentState = timed == total ? .complete : .partial
+            return
+        }
         let engine = self.engine
         let headers = loadedSourceHeaders
         let decode: LyricsAudioAligner.Decode = { start, length in
@@ -187,14 +215,25 @@ extension PlaybackController {
         }
 
         lyricsAligning = true
+        lyricsAlignmentState = .analyzing
         lyricsAlignmentTask = Task { @MainActor [weak self] in
             let coverage = await LyricsAudioAligner.align(
                 lines: lines,
                 durationSeconds: trackDuration,
                 decode: decode,
                 playhead: { [weak self] in self?.position ?? 0 },
+                allowPermissionRequest: allowPermissionRequest,
+                onState: { [weak self] state in
+                    guard let self,
+                          !Task.isCancelled,
+                          self.current?.id == entry.id,
+                          self.lyricsRequestGeneration == requestGeneration
+                    else { return }
+                    self.lyricsAlignmentState = state
+                },
                 onUpdate: { [weak self] updated in
                     guard let self,
+                          !Task.isCancelled,
                           self.current?.id == entry.id,
                           self.lyricsRequestGeneration == requestGeneration
                     else { return }
@@ -203,6 +242,7 @@ extension PlaybackController {
             )
             MemoryRelief.soon()
             guard let self,
+                  !Task.isCancelled,
                   self.current?.id == entry.id,
                   self.lyricsRequestGeneration == requestGeneration
             else { return }
@@ -211,11 +251,33 @@ extension PlaybackController {
             // this app's ears, not the provider's, so a listener who finds a
             // badly-synced line knows whom to tell.
             self.lyricsAlignedLocally = coverage
+            if coverage.timed > 0 {
+                LyricsAlignmentCache.insert(self.lyrics, for: cacheKey)
+            }
+            if coverage.timed == 0 && self.lyricsAlignmentState == .analyzing {
+                self.lyricsAlignmentState = .noMatch
+            }
             self.lyricsAlignmentTask = nil
             PlaybackDebugLog.shared.record(
                 "lyrics: local alignment timed \(coverage.timed) of \(coverage.total) lines",
                 about: entry.id
             )
         }
+    }
+
+    func retryLyricsAlignment() {
+        guard let entry = current, !lyrics.isEmpty else { return }
+        lyricsAlignmentTask?.cancel()
+        lyricsAlignmentTask = nil
+        lyricsAligning = false
+        lyricsAlignedLocally = nil
+        lyricsAlignmentState = .idle
+        alignFetchedLyricsIfNeeded(
+            lyrics,
+            for: entry,
+            requestGeneration: lyricsRequestGeneration,
+            allowPermissionRequest: true,
+            useCache: false
+        )
     }
 }

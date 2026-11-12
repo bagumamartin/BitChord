@@ -34,6 +34,8 @@ final class FeedLoader {
     private(set) var phase: Phase = .loading
     private(set) var loadingMore = false
     private(set) var refreshError: String?
+    private(set) var paginationError: String?
+    var hasMore: Bool { continuation?.isEmpty == false }
     /// The track that was playing when this feed last finished loading, kept
     /// by the view that owns the controller. Upstream's `homeStale`: a play
     /// registered since the fetch means the page may be out of date — and
@@ -74,6 +76,7 @@ final class FeedLoader {
 
     private func fetch(epoch: Int?, context: PageContext, id: UUID) async {
         refreshError = nil
+        paginationError = nil
         continuation = nil
         do {
             let started = ContinuousClock.now
@@ -114,6 +117,8 @@ final class FeedLoader {
                 : try await InnertubeFeed.shared.moreExplore(token: token)
             guard requestID == id, PageSession.generation() == context.generation, !Task.isCancelled else { return }
             continuation = result.continuation
+            refreshError = nil
+            paginationError = nil
             if case .loaded(let existing) = phase {
                 let seen = Set(existing.map(\.title))
                 phase = .loaded(existing + result.shelves.filter { !seen.contains($0.title) })
@@ -121,7 +126,7 @@ final class FeedLoader {
         } catch {
             guard requestID == id, PageSession.generation() == context.generation, !Task.isCancelled else { return }
             AuthController.reportIfSessionExpired(error)
-            refreshError = error.localizedDescription
+            paginationError = error.localizedDescription
         }
     }
 }

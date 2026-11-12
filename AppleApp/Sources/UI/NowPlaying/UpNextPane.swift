@@ -17,10 +17,15 @@ import AppKit
 struct UpNextPane: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AuthController.self) private var auth
+    @Environment(AppModel.self) private var appModel
 
     var showsCurrentTrackHeader = true
     var onOpenLyrics: () -> Void = {}
     @State private var hasScrolledOnce = false
+    @State private var queueSearch = ""
+    @State private var historyExpanded = false
+    @State private var manualExpanded = true
+    @State private var autoplayExpanded = true
     @AppStorage("show_queue_history") private var showQueueHistory = false
 
     /// The queue list, one layout on every platform: "Queue" with Clear, a
@@ -35,7 +40,8 @@ struct UpNextPane: View {
     }
 
     private var queueList: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let _ = LikeStore.shared.epoch
+        return VStack(alignment: .leading, spacing: 12) {
             // The big current-track header (artwork, like, menu) only where
             // the artwork column is absent. iPad landscape and mac show all
             // of that on the left already; repeating it here doubles the
@@ -48,6 +54,12 @@ struct UpNextPane: View {
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.white)
                 Spacer()
+                Button(action: openMusicSearch) {
+                    Label("Add Music", systemImage: "plus")
+                        .font(.callout.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
                 if !manualUpcoming.isEmpty || !autoplayUpcoming.isEmpty {
                     Button("Clear") { controller.clearUpcoming() }
                         .buttonStyle(.plain)
@@ -58,26 +70,62 @@ struct UpNextPane: View {
             .padding(.horizontal, 24)
             .id("queueTop")
 
+            if !allQueueRows.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.white.opacity(0.55))
+                    TextField("Find in queue", text: $queueSearch)
+                        .textFieldStyle(.plain)
+                        .foregroundStyle(.white)
+                        .autocorrectionDisabled()
+                    if !queueSearch.isEmpty {
+                        Button { queueSearch = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.65))
+                            .accessibilityLabel("Clear queue search")
+                    }
+                }
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 24)
+            }
+
             if controller.current == nil && manualUpcoming.isEmpty && autoplayUpcoming.isEmpty {
-                Text("Nothing playing.")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .padding(.top, 8)
-                    .padding(.horizontal, 24)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Nothing playing.")
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.65))
+                    Button {
+                        openMusicSearch()
+                    } label: {
+                        Label("Find Music", systemImage: "magnifyingglass")
+                            .font(.callout.weight(.semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white.opacity(0.18))
+                }
+                .padding(.top, 8)
+                .padding(.horizontal, 24)
                 Spacer()
             } else {
                 ScrollViewReader { proxy in
                     List {
-                        if !historyRows.isEmpty {
-                            Text("Previously Played")
-                                .font(.headline.weight(.medium))
-                                .foregroundStyle(.white.opacity(0.75))
-                                .padding(.top, 12)
+                        if !queueSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           filteredHistoryRows.isEmpty, filteredManualUpcoming.isEmpty, filteredAutoplayUpcoming.isEmpty {
+                            Text("No queue matches")
+                                .font(.callout)
+                                .foregroundStyle(.white.opacity(0.55))
                                 .listRowBackground(Color.clear)
                                 .listRowSeparator(.hidden)
-                                .listRowInsets(EdgeInsets(top: 12, leading: 24, bottom: 6, trailing: 24))
-                            ForEach(historyRows) { item in
-                                historyQueueRow(item)
+                        }
+                        if !filteredHistoryRows.isEmpty {
+                            sectionHeader("Previously Played", count: filteredHistoryRows.count, expanded: $historyExpanded)
+                            if historyExpanded {
+                                ForEach(filteredHistoryRows) { item in historyQueueRow(item) }
                             }
                         }
                         if controller.current != nil {
@@ -90,21 +138,18 @@ struct UpNextPane: View {
                                 .listRowInsets(EdgeInsets(top: 12, leading: 24, bottom: 6, trailing: 24))
                             currentQueueRow
                         }
-                        if !manualUpcoming.isEmpty {
-                            Text("Up next")
-                                .font(.headline.weight(.medium))
-                                .foregroundStyle(.white.opacity(0.75))
-                                .padding(.top, 16)
-                                .listRowBackground(Color.clear)
-                                .listRowSeparator(.hidden)
-                                .listRowInsets(EdgeInsets(top: 16, leading: 24, bottom: 6, trailing: 24))
-                            ForEach(Array(manualUpcoming.enumerated()), id: \.element.id) { localIndex, item in
-                                queueListRow(item, section: 0, index: localIndex, rows: manualUpcoming)
+                        if !filteredManualUpcoming.isEmpty {
+                            sectionHeader("Up next", count: filteredManualUpcoming.count, expanded: $manualExpanded, topPadding: 16)
+                            if manualExpanded {
+                                ForEach(Array(filteredManualUpcoming.enumerated()), id: \.element.id) { localIndex, item in
+                                    queueListRow(item, section: 0, index: manualUpcoming.firstIndex(where: { $0.index == item.index }) ?? localIndex, rows: manualUpcoming)
+                                }
+                                .onMove { source, dest in move(source, dest, rows: filteredManualUpcoming) }
+                                .onDelete { offsets in remove(offsets, rows: filteredManualUpcoming) }
                             }
-                            .onMove { source, dest in move(source, dest, rows: manualUpcoming) }
-                            .onDelete { offsets in remove(offsets, rows: manualUpcoming) }
                         }
                         if controller.autoplayEnabled || !autoplayUpcoming.isEmpty {
+                            Button { autoplayExpanded.toggle() } label: {
                             HStack(spacing: 8) {
                                 Image(.bchInfinity)
                                     .resizable()
@@ -112,7 +157,7 @@ struct UpNextPane: View {
                                     .frame(width: 18, height: 18)
                                     .foregroundStyle(.white.opacity(0.75))
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text("AutoPlay")
+                                    Text("AutoPlay · \(filteredAutoplayUpcoming.count)")
                                         .font(.headline.weight(.medium))
                                         .foregroundStyle(.white)
                                     Text(autoplayUpcoming.isEmpty
@@ -121,17 +166,25 @@ struct UpNextPane: View {
                                         .font(.callout)
                                         .foregroundStyle(.white.opacity(0.55))
                                 }
+                                Spacer()
+                                Image(systemName: autoplayExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.55))
                             }
+                            .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("AutoPlay, \(filteredAutoplayUpcoming.count) tracks")
                             .padding(.vertical, 14)
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 14, leading: 24, bottom: 14, trailing: 24))
-                            if !autoplayUpcoming.isEmpty {
-                                ForEach(Array(autoplayUpcoming.enumerated()), id: \.element.id) { localIndex, item in
-                                    queueListRow(item, section: 1, index: localIndex, rows: autoplayUpcoming)
+                            if autoplayExpanded && !filteredAutoplayUpcoming.isEmpty {
+                                ForEach(Array(filteredAutoplayUpcoming.enumerated()), id: \.element.id) { localIndex, item in
+                                    queueListRow(item, section: 1, index: autoplayUpcoming.firstIndex(where: { $0.index == item.index }) ?? localIndex, rows: autoplayUpcoming)
                                 }
-                                .onMove { source, dest in move(source, dest, rows: autoplayUpcoming) }
-                                .onDelete { offsets in remove(offsets, rows: autoplayUpcoming) }
+                                .onMove { source, dest in move(source, dest, rows: filteredAutoplayUpcoming) }
+                                .onDelete { offsets in remove(offsets, rows: filteredAutoplayUpcoming) }
                             }
                         }
                         Button {
@@ -197,6 +250,37 @@ struct UpNextPane: View {
         .padding(.top, 8)
     }
 
+    private func openMusicSearch() {
+        appModel.nowPlayingPresented = false
+        appModel.requestedTab = .search
+        appModel.focusSearch = true
+        appModel.searchFocusTrigger &+= 1
+    }
+
+    private func sectionHeader(_ title: String, count: Int, expanded: Binding<Bool>, topPadding: CGFloat = 12) -> some View {
+        Button { expanded.wrappedValue.toggle() } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.headline.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.78))
+                Text("\(count)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, topPadding)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: topPadding, leading: 24, bottom: 6, trailing: 24))
+        .accessibilityLabel("\(title), \(count) tracks, \(expanded.wrappedValue ? "expanded" : "collapsed")")
+    }
+
     private var currentQueueRow: some View {
         Button {
             let at = controller.playingIndex
@@ -238,6 +322,18 @@ struct UpNextPane: View {
         return (0..<min(controller.playingIndex, controller.queue.count)).map { index in
             QueueRow(index: index, entry: controller.queue[index])
         }
+    }
+
+    private var allQueueRows: [QueueRow] { historyRows + manualUpcoming + autoplayUpcoming }
+
+    private var filteredHistoryRows: [QueueRow] { filtered(historyRows) }
+    private var filteredManualUpcoming: [QueueRow] { filtered(manualUpcoming) }
+    private var filteredAutoplayUpcoming: [QueueRow] { filtered(autoplayUpcoming) }
+
+    private func filtered(_ rows: [QueueRow]) -> [QueueRow] {
+        let query = queueSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return rows }
+        return rows.filter { QueueSearchPolicy.matches(title: $0.entry.title, artist: $0.entry.artist, query: query) }
     }
 
     private func historyQueueRow(_ item: QueueRow) -> some View {
@@ -312,10 +408,41 @@ struct UpNextPane: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Remove \(item.entry.title) from queue")
+            if let videoId = controller.youtubeVideoID(for: item.entry) {
+                Button {
+                    controller.toggleLike(videoId: videoId)
+                } label: {
+                    Image(systemName: LibraryActions.cachedLike(videoId) == "LIKE" ? "heart.fill" : "heart")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(LibraryActions.cachedLike(videoId) == "LIKE" ? Color.accentColor : .white.opacity(0.55))
+                        .frame(width: 32, height: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(LibraryActions.cachedLike(videoId) == "LIKE" ? "Remove \(item.entry.title) from Liked Music" : "Like \(item.entry.title)")
+                .disabled(!auth.signedIn)
+                .opacity(auth.signedIn ? 1 : 0.45)
+            }
         }
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 20))
+        .contextMenu {
+            if index > 0 {
+                Button("Move Earlier") { controller.moveQueueItem(from: item.index, to: item.index - 1) }
+            }
+            if index + 1 < rows.count {
+                Button("Move Later") { controller.moveQueueItem(from: item.index, to: item.index + 1) }
+            }
+        }
+        .accessibilityAction(named: Text("Move Earlier")) {
+            guard index > 0 else { return }
+            controller.moveQueueItem(from: item.index, to: item.index - 1)
+        }
+        .accessibilityAction(named: Text("Move Later")) {
+            guard index + 1 < rows.count else { return }
+            controller.moveQueueItem(from: item.index, to: item.index + 1)
+        }
         .onDrop(of: [.text], delegate: QueueReorderDelegate(section: section, rows: rows, destIndex: index) { from, dest in
             move(IndexSet(integer: from), dest, rows: rows)
         })

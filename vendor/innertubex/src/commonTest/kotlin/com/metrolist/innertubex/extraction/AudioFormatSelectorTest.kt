@@ -100,6 +100,25 @@ class AudioFormatSelectorTest {
     }
 
     @Test
+    fun strictBitrateCapChoosesEligibleAacOrOpusAndRejectsUnknown() {
+        val formats = listOf(
+            Format(itag = 140, mimeType = "audio/mp4; codecs=\"mp4a.40.2\"", bitrate = 128_000, url = "https://aac"),
+            Format(itag = 251, mimeType = "audio/webm; codecs=\"opus\"", bitrate = 160_000, url = "https://opus-high"),
+            Format(itag = 250, mimeType = "audio/webm; codecs=\"opus\"", bitrate = 96_000, url = "https://opus-low"),
+            Format(itag = 249, mimeType = "audio/webm; codecs=\"opus\"", bitrate = 0, url = "https://unknown"),
+        )
+
+        // AUTO retains its existing Opus preference among formats that pass the cap.
+        assertEquals(250, selectBestAudioFormat(formats, AudioQuality.AUTO, maxAudioBitrateBps = 128_000)?.itag)
+        // HIGH ranks the eligible formats by bitrate, so the 128 kbps AAC wins.
+        assertEquals(140, selectBestAudioFormat(formats, AudioQuality.HIGH, maxAudioBitrateBps = 128_000)?.itag)
+        assertEquals(250, selectBestAudioFormat(formats, AudioQuality.AUTO, maxAudioBitrateBps = 100_000)?.itag)
+        assertEquals(140, selectBestAudioFormat(formats, AudioQuality.MP4, maxAudioBitrateBps = 128_000)?.itag)
+        assertNull(selectBestAudioFormat(formats, AudioQuality.MP4, maxAudioBitrateBps = 64_000))
+        assertNull(selectBestAudioFormat(formats, AudioQuality.AUTO, maxAudioBitrateBps = 64_000))
+    }
+
+    @Test
     fun mp4RequiresAPlayerCompatibleFormat() {
         val formats =
             listOf(

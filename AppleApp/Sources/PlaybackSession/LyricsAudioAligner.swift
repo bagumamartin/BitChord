@@ -66,11 +66,14 @@ enum LyricsAudioAligner {
         durationSeconds: Double,
         decode: @escaping Decode,
         playhead: @escaping Playhead = { 0 },
+        allowPermissionRequest: Bool = false,
+        onState: @escaping @MainActor (LyricsAlignmentState) -> Void = { _ in },
         onUpdate: @escaping Update
     ) async -> Coverage {
         let needing = lines.indices.filter { needsWords(lines[$0]) }
         let none = Coverage(timed: 0, total: needing.count)
-        guard durationSeconds > 0, !needing.isEmpty else { return none }
+        guard durationSeconds > 0 else { onState(.audioUnavailable); return none }
+        guard !needing.isEmpty else { onState(.complete); return none }
 
         var latest = lines
         let track: Update = { updated in
@@ -93,21 +96,34 @@ enum LyricsAudioAligner {
                 chunkSeconds: chunkSeconds,
                 onUpdate: track
             )
-            if handled { return coverage(of: latest, needing: needing) }
+            if handled {
+                let result = coverage(of: latest, needing: needing)
+                onState(result.timed == 0 ? .noMatch : result.timed == result.total ? .complete : .partial)
+                return result
+            }
         }
         try? await Task.sleep(for: .seconds(startDelaySeconds))
         guard !Task.isCancelled else { return none }
-        _ = await alignWithLegacyRecognizer(
+        guard await hasSpeechAuthorization(allowRequest: allowPermissionRequest) else {
+            onState(.permissionNeeded)
+            return coverage(of: latest, needing: needing)
+        }
+        onState(.analyzing)
+        let outcome = await alignWithLegacyRecognizer(
             lines: lines,
             durationSeconds: durationSeconds,
             decode: decode,
             playhead: playhead,
             onUpdate: track
         )
-        return coverage(of: latest, needing: needing)
+        let result = coverage(of: latest, needing: needing)
+        onState(result.timed > 0
+            ? (result.timed == result.total ? .complete : .partial)
+            : outcome)
+        return result
     }
 
-    private static func needsWords(_ line: LyricLineDto) -> Bool {
+    static func needsWords(_ line: LyricLineDto) -> Bool {
         guard !line.isGap, line.words.isEmpty else { return false }
         // Chinese, Japanese and Thai lines have no spaces between words.
         return line.text.split(whereSeparator: \.isWhitespace).count >= 2
@@ -129,38 +145,57 @@ enum LyricsAudioAligner {
         return Coverage(timed: timed, total: needing.count)
     }
 
+    private static func hasSpeechAuthorization(allowRequest: Bool) async -> Bool {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized: true
+        case .notDetermined where allowRequest:
+            await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+            }
+        default: false
+        }
+    }
+
     private static func alignWithLegacyRecognizer(
         lines: [LyricLineDto],
         durationSeconds: Double,
         decode: @escaping Decode,
         playhead: @escaping Playhead,
         onUpdate: @escaping Update
-    ) async -> Bool {
-        guard lines.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-              await requestAuthorization()
-        else { return false }
+    ) async -> LyricsAlignmentState {
+        guard lines.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        else { return .noMatch }
 
         let phrases = lines.map(\.text).filter { !$0.isEmpty }.prefix(100)
-        guard let locale = recognizerLocale(for: phrases.joined(separator: " ")),
-              let recognizer = SFSpeechRecognizer(locale: locale),
-              recognizer.isAvailable,
-              recognizer.supportsOnDeviceRecognition
-        else {
-            NSLog("[BitChord] local lyric alignment unavailable for this language/device")
-            return false
+        let detected = recognizerLanguage(for: lines)?.languageCode
+        let candidates = LyricsLocaleCandidates.ordered(
+            detectedLanguages: detected.map { [$0] } ?? [],
+            preferredIdentifiers: Locale.preferredLanguages,
+            supportedIdentifiers: SFSpeechRecognizer.supportedLocales().map(\.identifier)
+        )
+        guard !candidates.isEmpty else { return .languageUnavailable }
+        var recognizer: SFSpeechRecognizer?
+        for identifier in candidates {
+            guard let candidate = SFSpeechRecognizer(locale: Locale(identifier: identifier)),
+                  candidate.isAvailable, candidate.supportsOnDeviceRecognition else { continue }
+            recognizer = candidate
+            break
         }
+        guard let recognizer else { return .deviceUnavailable }
 
         var observations: [LyricWordObservation] = []
         var lastSignature = timingSignature(lines)
         var startSeconds = 0.0
         var alignedAtLeastOneLine = false
         var noAudioRetries = 0
+        var hadRecognitionError = false
+        var latestLines = lines
 
         while startSeconds < durationSeconds {
-            if Task.isCancelled { return alignedAtLeastOneLine }
+            if Task.isCancelled { return .failed }
             while startSeconds > playhead() + leadSeconds {
                 try? await Task.sleep(for: .seconds(2))
-                if Task.isCancelled { return alignedAtLeastOneLine }
+                if Task.isCancelled { return .failed }
             }
             let requestedDuration = min(chunkSeconds, durationSeconds - startSeconds)
             let region = await Task.detached(priority: .utility) {
@@ -209,11 +244,13 @@ enum LyricsAudioAligner {
                     {
                         lastSignature = signature
                         alignedAtLeastOneLine = true
+                        latestLines = updated
                         onUpdate(updated)
                     }
                 } catch is CancellationError {
-                    return alignedAtLeastOneLine
+                    return .failed
                 } catch {
+                    hadRecognitionError = true
                     NSLog("[BitChord] local lyric recognition chunk at %.1fs failed: %@",
                           startSeconds, String(describing: error))
                 }
@@ -227,7 +264,11 @@ enum LyricsAudioAligner {
             guard nextStart > startSeconds + 0.05 else { break }
             startSeconds = nextStart
         }
-        return alignedAtLeastOneLine
+        if alignedAtLeastOneLine {
+            return latestLines.contains(where: { !$0.isGap && $0.words.isEmpty }) ? .partial : .complete
+        }
+        if noAudioRetries > 0 { return .audioUnavailable }
+        return hadRecognitionError ? .failed : .noMatch
     }
 
     static func recognizerLanguage(for lines: [LyricLineDto]) -> Locale? {

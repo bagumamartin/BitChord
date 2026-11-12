@@ -62,8 +62,8 @@ enum AudioSettingsItem: String, CaseIterable, Identifiable {
     var keywords: [String] {
         switch self {
         case .sources: return ["addons", "server", "source order", "priority", "refresh", "webdav", "smb", "nas", "jiosaavn"]
-        case .wifi: return ["wifi", "wi-fi", "lossless", "flac", "hi-res", "streaming", "bitrate", "unmetered"]
-        case .cellular: return ["mobile data", "cellular", "lossless", "flac", "streaming", "bitrate", "metered"]
+        case .wifi: return ["wifi", "wi-fi", "lossless", "flac", "hi-res", "streaming", "bitrate", "unmetered", "highest", "best", "preferred quality", "data saver"]
+        case .cellular: return ["mobile data", "cellular", "lossless", "flac", "streaming", "bitrate", "metered", "highest", "best", "preferred quality", "data saver"]
         case .soundMode: return ["transparent", "enhanced", "dsp", "clarity"]
         case .clarityPreset: return ["reference", "speaker", "headphone", "dac", "enhanced"]
         case .clarityMix: return ["wet", "tone", "enhanced"]

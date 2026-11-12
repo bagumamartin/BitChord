@@ -27,9 +27,11 @@ struct LyricsPane: View {
     var hasTrack: Bool
     var sourceLabel: String? = nil
     var alignmentInProgress: Bool = false
-    /// How much of the lyric this app's on-device alignment timed. The
-    /// attribution claims only what was actually timed.
+    /// The word timings were added by this app's on-device alignment, not
+    /// supplied by the provider — the attribution says so.
     var alignedLocally: LyricsAudioAligner.Coverage? = nil
+    var alignmentState: LyricsAlignmentState = .idle
+    var onRetryAlignment: (() -> Void)? = nil
     /// Opens the per-track provider picker — shown with the no-lyrics state,
     /// where it is most needed and previously unreachable.
     var onChooseSource: (() -> Void)? = nil
@@ -50,6 +52,8 @@ struct LyricsPane: View {
     var onChangeSource: (() -> Void)? = nil
     var onRevealControls: (() -> Void)? = nil
     var onFocusLyrics: (() -> Void)? = nil
+    var onSwitchToPlayer: (() -> Void)? = nil
+    var onSwitchToQueue: (() -> Void)? = nil
     /// Whether lines are being picked for a share card: armed from the header,
     /// or merely because something is already picked. While it holds, a line
     /// tap toggles the pick instead of seeking.
@@ -198,6 +202,23 @@ struct LyricsPane: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(picking && selection.contains(row.id) ? [.isSelected] : [])
             .accessibilityHint(picking ? "Double-tap to add to the share card" : "")
+            .accessibilityLabel(row.leadText + (row.backingText.map { ", " + $0 } ?? ""))
+            .accessibilityAction(named: Text(picking ? "Toggle share selection" : (sourceVisible ? "Seek to lyric" : "Show player controls"))) {
+                switch mode {
+                case .reveal: onRevealControls?()
+                case .pick: toggleShareSelection(row.id)
+                case .seek: onSeek?(seekTarget(for: row))
+                }
+            }
+            .accessibilityAction(named: Text("Seek to lyric")) {
+                onSeek?(seekTarget(for: row))
+            }
+            .accessibilityAction(named: Text("Add or remove from share card")) {
+                toggleShareSelection(row.id)
+            }
+            .accessibilityAction(named: Text("Show player controls")) {
+                onRevealControls?()
+            }
         }
     }
 
@@ -230,6 +251,22 @@ struct LyricsPane: View {
                     if let translator {
                         LyricsTranslationNote(outcome: translator.outcome)
                             .padding(.horizontal, 12)
+                    }
+                    if alignmentState != .idle, let message = alignmentState.message {
+                        HStack(spacing: 10) {
+                            Text(message)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.white.opacity(0.78))
+                                .accessibilityLabel(message)
+                            if alignmentState.canRetry, let onRetryAlignment {
+                                Button("Retry", action: onRetryAlignment)
+                                    .font(.caption.weight(.semibold))
+                                    .buttonStyle(.bordered)
+                                    .tint(.white)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .accessibilityElement(children: .contain)
                     }
                     ScrollViewReader { proxy in
                         let document = cache.document(for: lines)
@@ -300,6 +337,22 @@ struct LyricsPane: View {
                     if !selection.isEmpty || sharePicking {
                         shareBar
                             .padding(.horizontal, 12)
+                    }
+                    if !sourceVisible && (onSwitchToPlayer != nil || onSwitchToQueue != nil) {
+                        HStack(spacing: 14) {
+                            if let onSwitchToPlayer {
+                                Button("Player", action: onSwitchToPlayer)
+                                    .accessibilityHint("Shows playback controls")
+                            }
+                            if let onSwitchToQueue {
+                                Button("Up Next", action: onSwitchToQueue)
+                                    .accessibilityHint("Opens the queue")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                        .padding(.horizontal, 12)
+                        .accessibilityLabel("Player navigation")
                     }
                     if sourceVisible, let credit = attribution {
                         HStack(spacing: 8) {
@@ -568,7 +621,9 @@ struct LyricsPane: View {
 
     private var attribution: String? {
         guard let sourceLabel, !sourceLabel.isEmpty else { return nil }
-        if alignmentInProgress { return "Lyrics by \(sourceLabel) · syncing words…" }
+        if alignmentInProgress { return "Lyrics by \(sourceLabel) · aligning locally…" }
+        if alignmentState == .complete { return "Lyrics by \(sourceLabel) · fully synced locally by BitChord" }
+        if alignmentState == .partial { return "Lyrics by \(sourceLabel) · partially synced locally by BitChord" }
         // Claim only what the audio actually timed. "Synced by BitChord" used
         // to appear when a single line matched; a part-timed lyric now says
         // how much, and a pass that matched nothing claims nothing.

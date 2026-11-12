@@ -46,7 +46,7 @@ final class LocalLibrary {
 
     private var scanTask: Task<Void, Never>?
     private var scanID = UUID()
-    private var securityURL: URL?
+    private var folderAccess: SecurityScopedResourceLease?
 
     /// Restores the persisted bookmark and rescans. BITCHORD_LIBRARY_PATH is
     /// a dev-only override so automated UI tests can seed the library without
@@ -60,12 +60,17 @@ final class LocalLibrary {
         let stored = PlatformSettings.shared.getString(key: "local_library_path", default: "")
         guard !stored.isEmpty, let data = Data(base64Encoded: stored) else { return }
         var stale = false
+        #if os(macOS)
+        let options: URL.BookmarkResolutionOptions = [.withSecurityScope]
+        #else
+        let options: URL.BookmarkResolutionOptions = []
+        #endif
         guard let url = try? URL(resolvingBookmarkData: data,
-                                options: [],
+                                options: options,
                                 relativeTo: nil,
                                 bookmarkDataIsStale: &stale) else { return }
-        _ = url.startAccessingSecurityScopedResource()
-        securityURL = url
+        adoptAccess(to: url)
+        if stale { persistBookmark(for: url) }
         scan(folder: url)
     }
 
@@ -78,11 +83,8 @@ final class LocalLibrary {
         panel.allowsMultipleSelection = false
         panel.message = "Choose the folder holding your music library"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        _ = url.startAccessingSecurityScopedResource()
-        securityURL = url
-        if let bookmark = try? url.bookmarkData() {
-            AppSettings.shared.setLocalLibraryPath(value: bookmark.base64EncodedString())
-        }
+        adoptAccess(to: url)
+        persistBookmark(for: url)
         scan(folder: url)
 #else
         pickingPlaceholder()
@@ -90,11 +92,8 @@ final class LocalLibrary {
     }
 
     func scanPicked(_ url: URL) {
-        _ = url.startAccessingSecurityScopedResource()
-        securityURL = url
-        if let bookmark = try? url.bookmarkData() {
-            AppSettings.shared.setLocalLibraryPath(value: bookmark.base64EncodedString())
-        }
+        adoptAccess(to: url)
+        persistBookmark(for: url)
         scan(folder: url)
     }
 
@@ -102,10 +101,44 @@ final class LocalLibrary {
     private func pickingPlaceholder() {}
     #endif
 
+    private func adoptAccess(to url: URL) {
+        guard folderAccess?.url != url.standardizedFileURL else { return }
+        folderAccess = SecurityScopedResourceLease(url: url)
+    }
+
+    private func persistBookmark(for url: URL) {
+        #if os(macOS)
+        let options: URL.BookmarkCreationOptions = [.withSecurityScope]
+        #else
+        let options: URL.BookmarkCreationOptions = []
+        #endif
+        if let bookmark = try? url.bookmarkData(options: options) {
+            AppSettings.shared.setLocalLibraryPath(value: bookmark.base64EncodedString())
+        }
+    }
+
+    func accessLease(for source: String?) -> SecurityScopedResourceLease? {
+        folderAccess?.covers(source) == true ? folderAccess : nil
+    }
+
+    func forgetFolder() {
+        scanTask?.cancel()
+        scanID = UUID()
+        scanTask = nil
+        folderAccess = nil
+        tracks = []
+        scanned = false
+        AppSettings.shared.setLocalLibraryPath(value: "")
+        onChange?()
+    }
+
     private func scan(folder: URL) {
         scanTask?.cancel()
         let id = UUID(); scanID = id
-        let work = Task.detached(priority: .utility) { Self.readTracks(folder: folder) }
+        let access = folderAccess
+        let work = Task.detached(priority: .utility) {
+            withExtendedLifetime(access) { Self.readTracks(folder: folder) }
+        }
         scanTask = Task {
             let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
             guard scanID == id, !Task.isCancelled else { return }

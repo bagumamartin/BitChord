@@ -90,6 +90,12 @@ object SourceResolver {
         else -> StreamRequest.Capped(quality.maxKbps)
     }
 
+    /** A capped request is strict even when a provider returns a weaker or undescribed result. */
+    internal fun satisfiesRequest(request: StreamRequest, stream: SourceStream): Boolean = when (request) {
+        is StreamRequest.Capped -> stream.format.kbps?.let { it > 0 && it <= request.capKbps } == true
+        is StreamRequest.Lossless, is StreamRequest.Best -> true
+    }
+
     // ── Playback ────────────────────────────────────────────────────────────
 
     /**
@@ -135,7 +141,9 @@ object SourceResolver {
         }
 
         if (pinned != null) {
-            val pinnedStream = attempt(pinned) { pinned.stream(trackId, request) }?.let { StreamVerification.verify(it) }
+            val pinnedStream = attempt(pinned) { pinned.stream(trackId, request) }
+                ?.let { StreamVerification.verify(it) }
+                ?.takeIf { satisfiesRequest(request, it) }
             if (pinnedStream != null) {
                 if (!rejectUnsupportedNativeStream(pinned, pinnedStream, target.title)) {
                     return pinnedStream.copy(sourceConfigId = pinned.configId)
@@ -383,6 +391,14 @@ object SourceResolver {
         request: StreamRequest = requestForDownload(),
     ): SourceStream? = coroutineScope {
         if (target.title.isBlank()) return@coroutineScope null
+        if (request is StreamRequest.Capped) {
+            // A standard download asks for a bounded transcode. YouTube is the only
+            // source with a bitrate ladder; addon declarations do not prove the URL
+            // returned actually honors the cap.
+            val youtube = SourceRegistry.active().firstOrNull { it.kind == SourceKind.YOUTUBE }
+                ?: return@coroutineScope null
+            return@coroutineScope matchAndStream(youtube, target, request, strictLength = target.durationSec != null)
+        }
         val wantsLossless = when (request) {
             is StreamRequest.Lossless -> true
             is StreamRequest.Best -> false
@@ -391,7 +407,7 @@ object SourceResolver {
             // to be asked for *that* rung rather than for the best it has.
             // JioSaavn's 320 is not a better answer to it, it is the wrong answer.
             // YouTube's ladder is the only one that can be capped.
-            is StreamRequest.Capped -> return@coroutineScope null
+            is StreamRequest.Capped -> return@coroutineScope null // handled above
         }
         // SourceRegistry.active, not the playback list: a download is not budgeted by
         // the connection's streaming ceiling. What it keeps is the download
@@ -612,7 +628,7 @@ object SourceResolver {
                 running -= ready.toSet()
                 for (done in ready) {
                     val (source, stream) = done.await()
-                    if (stream == null) continue
+                    if (stream == null || !satisfiesRequest(request, stream)) continue
                     if (!accept(source, stream)) continue
                     val previous = best
                     if (isBetter(stream.format, previous?.second?.format) ||
@@ -781,6 +797,10 @@ object SourceResolver {
                 sourceConfigId = source.configId,
             )) ?: continue
             val served = stream.format
+            if (!satisfiesRequest(request, stream)) {
+                DebugLog.d("${source.displayName} returned ${served.summary} above or without the requested ${request.kbpsCeiling}kbps cap")
+                continue
+            }
             if (rejectUnsupportedNativeStream(source, stream, match.title)) continue
             if (!allowLossless && served.isLossless == true) {
                 DebugLog.d("${source.displayName} offered lossless for '${match.title}' on a route that cannot carry it; trying another match")

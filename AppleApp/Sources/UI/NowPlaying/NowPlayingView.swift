@@ -26,7 +26,7 @@ struct NowPlayingView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
     @Environment(AuthController.self) var auth
-    @Environment(ToastCenter.self) private var toast
+    @Environment(ToastCenter.self) var toast
     // Upstream restores the last expanded-player surface and starts on MAIN
     // for a fresh install. Persisting this here also keeps rotation/reopening
     // from unexpectedly dropping a listener into lyrics.

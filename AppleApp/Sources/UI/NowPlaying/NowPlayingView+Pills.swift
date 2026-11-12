@@ -55,15 +55,40 @@ extension NowPlayingView {
             .animation(.easeInOut(duration: 0.3), value: current?.id)
             Spacer(minLength: 10)
             if auth.signedIn, current?.videoId != nil {
-                GlassCircleButton(
-                    system: controller.isLiked ? "star.fill" : "star",
-                    selected: controller.isLiked,
-                    label: controller.isLiked ? "Remove from Liked" : "Like"
-                ) {
+                Button {
                     Haptics.play(.tap)
                     controller.toggleLike()
+                } label: {
+                    Label(controller.isLiked ? "Liked" : "Like", systemImage: controller.isLiked ? "heart.fill" : "heart")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .frame(height: 36)
+                        .background(.white.opacity(controller.isLiked ? 0.22 : 0.14), in: Capsule())
+                        .contentShape(Capsule())
                 }
-                .help(controller.isLiked ? "Remove from Liked Music" : "Like")
+                .buttonStyle(.plain)
+                .accessibilityLabel(controller.isLiked ? "Liked. Remove from Liked Music" : "Not liked. Add to Liked Music")
+                .accessibilityValue(controller.isLiked ? "Liked" : "Not liked")
+                .help(controller.isLiked ? "Remove from Liked Music" : "Add to Liked Music")
+                .padding(.trailing, 8)
+            }
+            if let current {
+                Button {
+                    controller.addToQueue(current)
+                    toast.queueNotice("Added to queue: \(current.title)")
+                    Haptics.play(.tap)
+                } label: {
+                    Image(systemName: "text.badge.plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(.white.opacity(0.14), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add \(current.title) to Up Next")
+                .help("Add to Up Next")
                 .padding(.trailing, 8)
             }
             moreMenu
@@ -130,8 +155,75 @@ extension NowPlayingView {
                     .lineLimit(1)
                     .accessibilityLabel(outputCaption)
             }
+            playbackQualityStatusChip
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// A compact truthful readout: codec and bitrate are shown only after the
+    /// engine reports decoded audio. Tapping opens the existing full pipeline.
+    var playbackQualityStatusChip: some View {
+        let loaded = controller.current.map { controller.engineLoadedId == $0.id } ?? false
+        let measured = loaded && controller.dolbyRenderer == nil ? controller.nerd : nil
+        let format = [
+            measured?.codec.isEmpty == false ? measured?.codec : nil,
+            (measured?.kbps ?? 0) > 0 ? "\(measured!.kbps) kbps" : nil
+        ].compactMap { $0 }.joined(separator: " · ")
+        let source = controller.playbackSourceName
+        let title: String
+        if !format.isEmpty {
+            title = [source, format].compactMap { $0 }.joined(separator: " · ")
+        } else if let source {
+            title = source
+        } else {
+            title = controller.isBuffering ? "Loading audio details…" : "Audio details"
+        }
+        return HStack(spacing: 8) {
+            Button { showPipeline = true } label: {
+                Label(title, systemImage: "waveform.path")
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(.white.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(format.isEmpty
+                ? "Open audio pipeline details. \(source.map { "Source: \($0)." } ?? "Format not measured yet.")"
+                : "Measured audio: \([source, format].compactMap { $0 }.joined(separator: ", ")). Open audio pipeline details")
+
+            if let error = controller.lastError, !error.isEmpty {
+                Text(userFacingPlaybackError(error))
+                    .font(.caption)
+                    .lineLimit(2)
+                    .foregroundStyle(.white.opacity(0.76))
+                if !controller.isBuffering {
+                    Button("Retry") { controller.togglePlayPause() }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .tint(.white.opacity(0.22))
+                }
+            } else if controller.isBuffering {
+                Label("Buffering", systemImage: "arrow.trianglehead.2.clockwise")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            } else if controller.racingLossless {
+                Label("Checking for a higher quality source", systemImage: "arrow.up.circle")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+        }
+        .foregroundStyle(.white.opacity(0.86))
+        .frame(maxWidth: .infinity)
+        .padding(.top, 2)
+    }
+
+    private func userFacingPlaybackError(_ error: String) -> String {
+        if error.localizedCaseInsensitiveContains("offline playback is on") { return error }
+        if error.localizedCaseInsensitiveContains("waiting for the network")
+            || error.localizedCaseInsensitiveContains("notconnected")
+            || error.localizedCaseInsensitiveContains("network") { return "Waiting for a connection." }
+        return "Playback couldn't continue."
     }
 
     /// Where the action row's two 44pt glyph buttons start in from either edge.

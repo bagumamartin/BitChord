@@ -115,6 +115,10 @@ struct SavedPlaylistsView: View {
     @State private var showImportPicker = false
     @State private var importDraft: PlaylistImportDraft?
     @State private var matchingImport = false
+    @State private var importProgress = 0
+    @State private var importTotal = 0
+    @State private var importTask: Task<Void, Never>?
+    @State private var activeImportID: UUID?
     @State private var showImportMessage = false
     @State private var importMessage = ""
     @State private var local = LocalLibrary.shared
@@ -159,6 +163,8 @@ struct SavedPlaylistsView: View {
                         }
                         if !devicePlaylists.isEmpty || !m3uPlaylists.isEmpty {
                             deviceSection
+                        } else {
+                            localPlaylistOnboarding
                         }
                     }
                     .padding(.horizontal, 24)
@@ -216,9 +222,15 @@ struct SavedPlaylistsView: View {
             if matchingImport {
                 ZStack {
                     Color.black.opacity(0.12).ignoresSafeArea()
-                    ProgressView("Matching playlist tracks…")
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    VStack(spacing: 14) {
+                        ProgressView(value: Double(importProgress), total: Double(max(importTotal, 1)))
+                        Text("Matching \(importProgress) of \(importTotal) tracks")
+                            .accessibilityLabel("Matching \(importProgress) of \(importTotal) tracks")
+                        Button("Cancel Matching", role: .cancel) { cancelImportMatching() }
+                    }
+                    .padding(20)
+                    .frame(minWidth: 240)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                 }
             }
         }
@@ -271,6 +283,32 @@ struct SavedPlaylistsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 24)
+    }
+
+    private var localPlaylistOnboarding: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "music.note.list")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("No playlists on this device yet")
+                .font(.headline)
+            Text("Import a CSV or TSV playlist, or add a music folder to discover local M3U playlists.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack {
+                Button("Import Playlist File", systemImage: "doc.badge.plus") { showImportPicker = true }
+                    .buttonStyle(.borderedProminent)
+                PushLink { LocalMusicView() } label: {
+                    Label("Browse Local Music", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 30)
+        .accessibilityElement(children: .contain)
     }
 
     private var deviceSection: some View {
@@ -386,10 +424,32 @@ struct SavedPlaylistsView: View {
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
                 let parsed = try PlaylistFileImport.parse(data: Data(contentsOf: url), filename: url.lastPathComponent)
-                Task {
+                importProgress = 0
+                importTotal = parsed.rows.count
+                importTask?.cancel()
+                let requestID = UUID()
+                activeImportID = requestID
+                importTask = Task {
                     matchingImport = true
-                    defer { matchingImport = false }
-                    let matched = await PlaylistFileImport.match(parsed)
+                    defer {
+                        if activeImportID == requestID {
+                            matchingImport = false
+                            activeImportID = nil
+                            importTask = nil
+                        }
+                    }
+                    let matched = await PlaylistFileImport.match(parsed) { completed, total in
+                        Task { @MainActor in
+                            guard activeImportID == requestID else { return }
+                            importProgress = completed
+                            importTotal = total
+                        }
+                    }
+                    guard PlaylistFileImport.mayPresentResult(
+                        requestID: requestID,
+                        activeRequestID: activeImportID,
+                        isCancelled: Task.isCancelled
+                    ) else { return }
                     importDraft = matched
                 }
             } catch {
@@ -397,6 +457,13 @@ struct SavedPlaylistsView: View {
                 showImportMessage = true
             }
         }
+    }
+
+    private func cancelImportMatching() {
+        importTask?.cancel()
+        importTask = nil
+        activeImportID = nil
+        matchingImport = false
     }
 
     private func rescanM3u() {

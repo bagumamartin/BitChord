@@ -304,8 +304,8 @@ class SabrCoreTest {
 
     @Test
     fun sensitiveSabrModelsRedactUrlsAndTokenBytes() {
-        val secret = "synthetic-sabr-secret"
-        val url = "https://example.googlevideo.com/videoplayback?sig=$secret"
+        val redactionFixture = "synthetic-sabr-secret"
+        val url = "https://example.googlevideo.com/videoplayback?sig=$redactionFixture"
         val token = byteArrayOf(91, 82, 73)
         val bootstrap =
             bootstrapPlayerResponse()
@@ -325,7 +325,7 @@ class SabrCoreTest {
             )
         for (model in models) {
             val description = model.toString()
-            assertTrue(secret !in description)
+            assertTrue(redactionFixture !in description)
             assertTrue("googlevideo" !in description)
             assertTrue(token.contentToString() !in description)
         }

@@ -17,6 +17,7 @@ public class ContentHints(
     public val playbackClientOverrideId: String? = null,
     public val sabrFirst: Boolean = false,
     public val maxVideoHeight: Int? = null,
+    public val maxAudioBitrateBps: Int? = null,
 ) {
     /** True only when the caller has independently confirmed YouTube Premium entitlement. */
     public var premium: Boolean = false
@@ -49,6 +50,7 @@ public class ContentHints(
     public operator fun component10(): Boolean = sabrFirst
 
     public operator fun component11(): Int? = maxVideoHeight
+    public operator fun component12(): Int? = maxAudioBitrateBps
 
     public fun copy(
         isExplicit: Boolean? = this.isExplicit,
@@ -62,6 +64,7 @@ public class ContentHints(
         playbackClientOverrideId: String? = this.playbackClientOverrideId,
         sabrFirst: Boolean = this.sabrFirst,
         maxVideoHeight: Int? = this.maxVideoHeight,
+        maxAudioBitrateBps: Int? = this.maxAudioBitrateBps,
     ): ContentHints =
         ContentHints(
             isExplicit = isExplicit,
@@ -75,6 +78,7 @@ public class ContentHints(
             playbackClientOverrideId = playbackClientOverrideId,
             sabrFirst = sabrFirst,
             maxVideoHeight = maxVideoHeight,
+            maxAudioBitrateBps = maxAudioBitrateBps,
         ).also {
             it.premium = premium
             it.allowHls = allowHls
@@ -113,6 +117,7 @@ public class ContentHints(
             playbackClientOverrideId == other.playbackClientOverrideId &&
             sabrFirst == other.sabrFirst &&
             maxVideoHeight == other.maxVideoHeight &&
+            maxAudioBitrateBps == other.maxAudioBitrateBps &&
             premium == other.premium &&
             allowHls == other.allowHls &&
             allowSabr == other.allowSabr &&
@@ -131,6 +136,7 @@ public class ContentHints(
         result = 31 * result + (playbackClientOverrideId?.hashCode() ?: 0)
         result = 31 * result + sabrFirst.hashCode()
         result = 31 * result + (maxVideoHeight ?: 0)
+        result = 31 * result + (maxAudioBitrateBps ?: 0)
         result = 31 * result + premium.hashCode()
         result = 31 * result + allowHls.hashCode()
         result = 31 * result + allowSabr.hashCode()
@@ -144,7 +150,7 @@ public fun ContentHints.diagnosticSummary(): String =
     "{explicit=$isExplicit, kids=$isKidsContent, ageRestricted=$isAgeRestricted, " +
         "live=$isLive, uploaded=$isUploaded, local=$isLocal, " +
         "endpointParamsPresent=${endpointParams != null}, wantVideo=$wantVideo, " +
-        "clientOverride=$playbackClientOverrideId, sabrFirst=$sabrFirst, maxVideoHeight=$maxVideoHeight, " +
+        "clientOverride=$playbackClientOverrideId, sabrFirst=$sabrFirst, maxVideoHeight=$maxVideoHeight, maxAudioBitrateBps=$maxAudioBitrateBps, " +
         "premium=$premium, allowHls=$allowHls, allowSabr=$allowSabr, allowBoundedRange=$allowBoundedRange}"
 
 public data class PlayerConfig(

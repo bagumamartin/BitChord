@@ -8,12 +8,14 @@ public fun selectBestAudioFormat(
     formats: List<Format>,
     audioQuality: AudioQuality = AudioQuality.AUTO,
     requireUrl: Boolean = true,
+    maxAudioBitrateBps: Int? = null,
 ): Format? {
     val validFormats =
         originalAudioTrack(
-            formats.filter {
-                it.isAudio && it.mimeType.startsWith("audio/", ignoreCase = true) &&
-                    (!requireUrl || !it.url.isNullOrBlank())
+            formats.filter { format ->
+                format.isAudio && format.mimeType.startsWith("audio/", ignoreCase = true) &&
+                    (!requireUrl || !format.url.isNullOrBlank()) &&
+                    (maxAudioBitrateBps == null || (format.bitrate > 0 && format.bitrate <= maxAudioBitrateBps))
             },
         )
     if (validFormats.isEmpty()) return null

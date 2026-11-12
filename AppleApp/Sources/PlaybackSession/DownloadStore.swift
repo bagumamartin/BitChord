@@ -19,6 +19,7 @@ struct DownloadedTrack: Identifiable, Hashable {
 final class DownloadStore {
     static let shared = DownloadStore()
     enum RequestResult: Equatable { case started, blockedByWifiOnly, alreadyExists, ignoredLocalTrack }
+    enum RetryAllResult: Equatable { case started(Int), waitingForWiFi(Int), waitingForNetwork(Int), noFailedJobs }
     struct Job: Identifiable, Codable {
         enum Status: String, Codable { case queued, running, done, failed }
         let id: String
@@ -78,6 +79,8 @@ final class DownloadStore {
     private var refreshTask: Task<Void, Never>?
     private var refreshID = UUID()
     private(set) var items: [DownloadedTrack] = []
+    private(set) var downloadedBytes: Int64 = 0
+    private var storedBytesByRequest: [String: Int64] = [:]
     private(set) var downloadedEntryKeys: Set<String> = []
     var jobs: [Job] = []
     private(set) var activities: [String: DownloadActivity] = [:]
@@ -94,6 +97,8 @@ final class DownloadStore {
     private var verified: [String: Date] = [:]
     private var artworkBackfills: [String: Task<Void, Never>] = [:]
     var activeCount: Int { jobs.filter { $0.status == .queued || $0.status == .running }.count }
+    var failedCount: Int { jobs.filter { $0.status == .failed }.count }
+    var completedCount: Int { jobs.filter { $0.status == .done }.count }
     var collections: [Owner] { index.owners.values.filter { $0.browseId != nil && $0.accountId == accountId }.sorted { $0.title < $1.title } }
     var folder: URL { directory.appendingPathComponent("audio", isDirectory: true) }
     private let directory: URL
@@ -331,16 +336,31 @@ final class DownloadStore {
         }
         let id = UUID(); refreshID = id
         refreshTask?.cancel()
+        let bindings = index.bindings
         let work = Task.detached(priority: .utility) {
-            assets.filter { FileManager.default.fileExists(atPath: $0.path) }.map { asset in
-                return DownloadedTrack(path: asset.path, title: asset.entry.title, artist: asset.entry.artist,
-                    album: asset.entry.albumName ?? "", artwork: nil, artworkURL: LocalArtwork.reference(path: asset.path))
-            }.sorted { $0.title < $1.title }
+            var scanned: [DownloadedTrack] = []
+            var assetSizes: [String: Int64] = [:]
+            for asset in assets {
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: asset.path),
+                      let bytes = attributes[.size] as? NSNumber else { continue }
+                assetSizes[asset.id] = bytes.int64Value
+                scanned.append(DownloadedTrack(path: asset.path, title: asset.entry.title, artist: asset.entry.artist,
+                    album: asset.entry.albumName ?? "", artwork: nil, artworkURL: LocalArtwork.reference(path: asset.path)))
+            }
+            var requestSizes: [String: Int64] = [:]
+            for (requestID, assetID) in bindings {
+                if let bytes = assetSizes[assetID] { requestSizes[requestID] = bytes }
+            }
+            let totalBytes = assetSizes.values.reduce(Int64(0), +)
+            return (scanned.sorted { $0.title < $1.title }, requestSizes, totalBytes)
         }
         refreshTask = Task {
-            let scanned = await work.value
+            let (scanned, requestSizes, totalBytes) = await work.value
             guard refreshID == id, !Task.isCancelled else { return }
-            items = scanned; onChange?()
+            items = scanned
+            storedBytesByRequest = requestSizes
+            downloadedBytes = totalBytes
+            onChange?()
         }
     }
     func waitForRefresh() async { await refreshTask?.value }
@@ -386,6 +406,9 @@ final class DownloadStore {
         let done = owner.requests.filter { id in index.bindings[id].flatMap { index.assets[$0] }.map(valid) ?? false }.count
         let failed = jobs.filter { owner.requests.contains($0.id) && $0.status == .failed }.count
         return "\(done) of \(owner.requests.count) saved" + (failed > 0 ? " · \(failed) failed" : "")
+    }
+    func storedBytes(for requestId: String) -> Int64? {
+        storedBytesByRequest[requestId]
     }
     @discardableResult func download(_ entry: QueueEntry) -> RequestResult {
         if afterRestore({ _ = self.download(entry) }) { return .started }
@@ -463,11 +486,32 @@ final class DownloadStore {
     }
     func removeOwner(_ id: String) { if afterRestore({ self.removeOwner(id) }) { return }; index.owners.removeValue(forKey: id); persist(); prune(); refresh() }
     func retryOwner(_ owner: Owner) { for id in owner.requests { _ = retry(id) } }
+    @discardableResult func retryAllFailed() -> RetryAllResult {
+        let ids = jobs.filter { $0.status == .failed }.map(\.id)
+        let disposition = DownloadRetryPolicy.disposition(
+            failedCount: ids.count,
+            connected: NetworkQuality.shared.connected,
+            metered: NetworkQuality.shared.metered,
+            wifiOnly: PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true)
+        )
+        guard !ids.isEmpty else { return .noFailedJobs }
+        for id in ids { _ = retry(id) }
+        switch disposition {
+        case .started: return .started(ids.count)
+        case .waitingForWiFi: return .waitingForWiFi(ids.count)
+        case .waitingForNetwork: return .waitingForNetwork(ids.count)
+        case .noFailedJobs: return .noFailedJobs
+        }
+    }
     @discardableResult func retry(_ id: String) -> RequestResult {
         guard let i = jobs.firstIndex(where: { $0.id == id && $0.status == .failed }) else { return .alreadyExists }
         jobs[i].status = .queued; jobs[i].attempts = 0; jobs[i].retryAt = nil; jobs[i].cancelled = false
         jobs[i].message = nil
-        persist(); pump(); return .started
+        persist(); pump()
+        if NetworkQuality.shared.metered && PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true) {
+            return .blockedByWifiOnly
+        }
+        return .started
     }
     func cancel(_ id: String, restartWorker: Bool = true) {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }

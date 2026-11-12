@@ -428,6 +428,9 @@ extension PlaybackController {
     /// replies. Run in an isolated bundle so the listener's queue/preferences stay intact.
     func verifyQueueBehavior() async {
         var checks: [String: Bool] = [:]
+        let savedOfflinePreference = OfflinePlaybackPolicy.isEnabled
+        OfflinePlaybackPolicy.setEnabled(false)
+        defer { OfflinePlaybackPolicy.setEnabled(savedOfflinePreference) }
         volume = 0
         autoplayEnabled = false
         setAutomixEnabled(false)
@@ -594,6 +597,50 @@ extension PlaybackController {
         for _ in 0..<100 { if isPlaying && engineLoadedId == entry.id && playGeneration > loopGeneration { break }; try? await Task.sleep(for: .milliseconds(50)) }
         checks["repeat_unarmed_end_reuses_local_recording"] = isPlaying && loadedSourcePath == path.path && lastError == nil
         repeatMode = .off
+        // Exercise the actual reload lifecycle, rather than only the flag used
+        // to request it: a paused quality change must not release audio.
+        pausePlayback()
+        seek(to: 6)
+        print("quality validation before paused reload: state=\(state) current=\(current?.id ?? "nil") queue=\(queue.map(\.id)) index=\(playingIndex) generation=\(playGeneration) offline=\(OfflinePlaybackPolicy.isEnabled) position=\(position)")
+        let pausedReloadGeneration = playGeneration
+        applySavedQualityToCurrentTrack()
+        for _ in 0..<100 {
+            if engineLoadedId == entry.id && state == .paused && playGeneration > pausedReloadGeneration { break }
+            if lastError != nil { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        checks["quality_reload_keeps_paused_intent"] = state == .paused && engineLoadedId == entry.id
+            && playGeneration > pausedReloadGeneration && abs(position - 6) < 0.5
+        print("quality validation paused result: state=\(state) loaded=\(engineLoadedId ?? "nil") generation=\(playGeneration) position=\(position) error=\(lastError ?? "nil")")
+        togglePlayPause()
+        for _ in 0..<60 { if isPlaying { break }; try? await Task.sleep(for: .milliseconds(50)) }
+        let playingReloadGeneration = playGeneration
+        applySavedQualityToCurrentTrack()
+        for _ in 0..<100 {
+            // Loading publishes metadata before the mixer publishes the first
+            // audible playhead; wait for that clock rather than sampling zero.
+            if isPlaying && engineLoadedId == entry.id && playGeneration > playingReloadGeneration
+                && playbackPosition >= 5.5 { break }
+            if lastError != nil { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        checks["quality_reload_keeps_playing_intent"] = isPlaying && engineLoadedId == entry.id
+            && playGeneration > playingReloadGeneration && playbackPosition >= 5.5
+        print("quality validation playing result: state=\(state) loaded=\(engineLoadedId ?? "nil") generation=\(playGeneration) position=\(playbackPosition) error=\(lastError ?? "nil")")
+        OfflinePlaybackPolicy.setEnabled(true)
+        let beforeOffline = playGeneration
+        offlinePlaybackEnabled()
+        checks["offline_toggle_preserves_local_playback"] = isPlaying && playGeneration == beforeOffline
+        let unsaved = QueueEntry.youtube(videoId: "offline-fixture", title: "Offline fixture", artist: "Fixture")
+        play([unsaved], context: "Offline validation", contextID: "offline-validation")
+        for _ in 0..<100 {
+            if lastError != nil && !isPlaying && !isBuffering { break }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        checks["offline_missing_audio_stops_without_skipping"] = !isPlaying && !isBuffering && engineLoadedId == nil
+            && current?.id == unsaved.id && playingIndex == 0 && queue.count == 1
+            && lastError?.contains("Offline playback is on") == true
+        print("offline validation result: state=\(state) current=\(current?.id ?? "nil") index=\(playingIndex) queue=\(queue.map(\.id)) offline=\(OfflinePlaybackPolicy.isEnabled) error=\(lastError ?? "nil")")
         sequencingTask?.cancel()
         try? engine.stop()
         let result: [String: Any] = ["checks": checks, "passed": checks.values.allSatisfy { $0 }]

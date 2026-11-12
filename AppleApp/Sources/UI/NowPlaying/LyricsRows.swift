@@ -559,7 +559,10 @@ struct LyricGapRow: View {
         .opacity(look.alpha)
         .blur(radius: look.blur)
         .animation(LyricStyle.settle, value: open)
-        .accessibilityLabel("Instrumental")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Instrumental break")
+        .accessibilityHint("Double-tap to seek to this break")
+        .accessibilityAction(named: Text("Seek to instrumental break")) { onTap() }
     }
 
     private func through(at date: Date) -> Double {

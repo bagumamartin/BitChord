@@ -99,6 +99,36 @@ class LyricsAudioAlignmentTest {
     }
 
     @Test
+    fun `incremental alignment retains words immediately after an aligned line`() {
+        val source = listOf(
+            LyricLineDto(0, "Silver birds"),
+            LyricLineDto(0, "Morning light opens every door."),
+        )
+        val firstChunk = listOf(
+            LyricWordObservation(1_000, 1_400, "silver"),
+            LyricWordObservation(1_500, 2_000, "birds"),
+        )
+        val first = LyricsAudioAlignment.align(source, firstChunk)
+        assertTrue(first[0].words.isNotEmpty())
+        assertTrue(first[1].words.isEmpty())
+
+        val complete = LyricsAudioAlignment.align(
+            first,
+            firstChunk + listOf(
+                LyricWordObservation(2_050, 2_200, "morning"),
+                LyricWordObservation(2_250, 2_400, "light"),
+                LyricWordObservation(2_450, 2_600, "opens"),
+                LyricWordObservation(2_650, 2_800, "every"),
+                LyricWordObservation(2_850, 3_000, "door"),
+            ),
+        )
+
+        assertEquals(first[0], complete[0])
+        assertEquals(2_050, complete[1].words.firstOrNull()?.startMs)
+        assertEquals(3_000, complete[1].words.lastOrNull()?.endMs)
+    }
+
+    @Test
     fun `a repeated chorus line takes the words sung in its own slot`() {
         val source = listOf(
             LyricLineDto(10_000, "Let me know now if you okay"),

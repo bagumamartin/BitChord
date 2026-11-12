@@ -28,14 +28,14 @@ extension SettingsView {
             .buttonStyle(.plain)
         }
         if localFolderName != nil {
-            rows.row("Use All Audio Folders", "folders", "forget", "local music", "library") {
+            rows.row("Forget Folder", "folders", "forget", "local music", "library") {
                 Button {
-                    AppSettings.shared.setLocalLibraryPath(value: "")
+                    LocalLibrary.shared.forgetFolder()
                     localFolderName = nil
                 } label: {
                     SettingsLine(
                         glyph: .localMusic,
-                        title: "Use All Audio Folders",
+                        title: "Forget Folder",
                         subtitle: "Forgets the chosen folder"
                     ) {
                         EmptyView()
@@ -91,10 +91,10 @@ extension SettingsView {
                 glyph: .storage,
                 title: "Song Cache Limit",
                 subtitle: cacheUnlimited
-                    ? "Every played song is kept until the disk is full."
+                    ? "Stream cache keeps played audio until the disk is full."
                     : cacheLimitMB > 2048
-                        ? "Up to \(Self.formatCache(cacheLimitMB)) of downloaded audio kept on disk."
-                        : "Downloaded audio kept on disk for instant seeking and replays",
+                        ? "Up to \(Self.formatCache(cacheLimitMB)) of stream cache for played audio."
+                        : "Played audio kept for instant seeking and replays; saved downloads are separate.",
                 valueText: cacheUnlimited ? "Unlimited" : Self.formatCache(cacheLimitMB),
                 value: Binding(
                     get: { Double(cacheLimitMB) },

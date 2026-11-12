@@ -22,6 +22,7 @@ struct AudioSettingsPageView: View {
     var focus: AudioSettingsItem? = nil
     @Environment(PlaybackController.self) private var controller
     @State private var showingPipeline = false
+    @State private var qualityApplyNotice: String?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -34,6 +35,31 @@ struct AudioSettingsPageView: View {
                     Text(page.title)
                 } footer: {
                     Text(footer)
+                }
+                if page == .source {
+                    Section {
+                        itemView(.requested)
+                        itemView(.decoded)
+                        Button {
+                            controller.applySavedQualityToCurrentTrack()
+                            qualityApplyNotice = OfflinePlaybackPolicy.isEnabled
+                                ? "Turn off Offline Playback before resolving a new stream."
+                                : "Applying the saved quality at the current position. Playback intent is preserved."
+                        } label: {
+                            Label("Apply to Current Track", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(controller.current == nil || controller.current?.isLocal == true)
+                        if let qualityApplyNotice { note(qualityApplyNotice) }
+                        PushLink {
+                            AudioSettingsPageView(page: .output, preferences: preferences)
+                        } label: {
+                            Label("View Current Output", systemImage: "hifispeaker")
+                        }
+                    } header: {
+                        Text("Current Track")
+                    } footer: {
+                        Text("New stream requests use your saved preference. Already loaded or queued audio may keep its current format.")
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -58,7 +84,7 @@ struct AudioSettingsPageView: View {
     private var readout: AudioSettingsReadout { controller.settingsAudioReadout }
     private var footer: String {
         switch page {
-        case .source: return "This is the quality BitChord requests, not a guarantee of the returned format. Lossless includes Hi-Res when a source supplies it. Downloads have their own quality setting."
+        case .source: return String(localized: "Low caps streams at 64 kbps and Medium at 128 kbps. The source must provide a known format within the cap; otherwise a track may be unavailable. Highest Available prefers lossless and Hi-Res when supplied, with fallback to available audio. Downloads have their own quality setting.")
         case .processing: return "Preferences stay saved when an effect cannot run. The status under each option describes the current audio path. Playback speed and transitions remain under Playback."
         case .output: return "Decoded source quality and device output are different stages. Bluetooth may compress a lossless source. Unknown values stay unreported until playback measures them."
         case .technical: return "These preferences affect the device output, not the quality supplied by an addon. The operating system and connected hardware determine which formats are available."

@@ -36,7 +36,7 @@ require AppleApp/Sources/UI/Settings/SettingsView+Appearance.swift 'rows.row("Ar
 require AppleApp/Sources/UI/Settings/SettingsView+Appearance.swift 'AppSettings.shared.setArtistSignaturesEnabled(value: value)'
 require AppleApp/Sources/UI/Settings/SettingsView+Appearance.swift 'AppSettings.shared.setArtistSignaturesWikimediaUrl(value: value)'
 require AppleApp/Sources/UI/NowPlaying/NowPlayingView.swift '.statusBarHidden(hideStatusBarInPlayer)'
-require AppleApp/Sources/UI/NowPlaying/UpNextPane.swift 'Text("Previously Played")'
+require AppleApp/Sources/UI/NowPlaying/UpNextPane.swift 'sectionHeader("Previously Played"'
 require AppleApp/Sources/UI/SourcesView.swift 'Text("Track Length Tolerance")'
 require shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AppSettings.kt 'fun setUpgradeLengthSlackSeconds(value: Int)'
 require shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AppSettings.kt 'KEY_UPGRADE_LENGTH_SLACK_SECONDS'

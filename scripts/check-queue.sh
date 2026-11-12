@@ -5,6 +5,8 @@ bin="$(mktemp -d)/queue-verify"
 xcrun swiftc -module-cache-path /tmp/bitchord-swift-module-cache -o "$bin" \
   "$repo/AppleApp/Sources/PlaybackSession/QueueEntry.swift" \
   "$repo/AppleApp/Sources/PlaybackSession/PlaybackQueuePolicy.swift" \
+  "$repo/AppleApp/Sources/PlaybackSession/PlaybackQueueSearchPolicy.swift" \
+  "$repo/AppleApp/Sources/PlaybackSession/PlaybackHandoffPolicy.swift" \
   "$repo/AppleApp/Sources/PlaybackSession/PlaybackQueueWindow.swift" \
   "$repo/AppleApp/Sources/PlaybackSession/LastPlayed.swift" \
   "$repo/scripts/queue-verify/main.swift"

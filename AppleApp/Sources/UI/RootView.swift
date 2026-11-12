@@ -707,6 +707,11 @@ struct RootView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        .toolbar {
+            if (AppModel.Tab(rawValue: selection) ?? .home) != .search {
+                ToolbarItem(placement: .topBarTrailing) { TopBarSearchButton() }
+            }
+        }
         .tabViewCustomization($tabCustomization)
         .onAppear {
             SidebarSelectionGuard.shared.onPlaylist = { index in

@@ -86,6 +86,45 @@ struct AppReleaseUpdate: Identifiable {
     var id: String { identity.key }
     var version: String { identity.version }
 
+    /// Plain display text for release summaries that should not include a
+    /// banner image or the repeated release title. Full Markdown remains in
+    /// `notes` for renderers that need to preserve the original payload.
+    var displayNotes: String {
+        guard let notes else { return "" }
+        var lines: [String] = []
+        var insideCodeFence = false
+        var firstContentLine = true
+        for rawLine in notes.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") {
+                insideCodeFence.toggle()
+                lines.append(rawLine)
+                firstContentLine = false
+                continue
+            }
+            if !insideCodeFence, line.hasPrefix("![") { continue }
+            if line.isEmpty {
+                lines.append("")
+                continue
+            }
+            if firstContentLine, !insideCodeFence,
+               line.range(of: #"^# BitChord(?:\s|$)"#, options: .regularExpression) != nil {
+                firstContentLine = false
+                continue
+            }
+            firstContentLine = false
+            lines.append(rawLine.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        while lines.first?.isEmpty == true { lines.removeFirst() }
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        var normalized: [String] = []
+        for line in lines {
+            if line.isEmpty, normalized.last?.isEmpty == true { continue }
+            normalized.append(line)
+        }
+        return normalized.joined(separator: "\n")
+    }
+
     /// Ambiguous legacy packages are deliberately left for the release page.
     static func legacyAsset(platform: String, assets: [ReleaseAsset], version: String? = nil) -> ReleaseAsset? {
         let suffix = platform == "ios" ? ".ipa" : ".dmg"
